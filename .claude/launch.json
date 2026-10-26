@@ -1,0 +1,27 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gopro-daily",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "gopro-daily",
+        "--no-browser"
+      ],
+      "port": 8765
+    },
+    {
+      "name": "gopro-daily-8766",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "gopro-daily",
+        "--no-browser",
+        "--port",
+        "8766"
+      ],
+      "port": 8766
+    }
+  ]
+}

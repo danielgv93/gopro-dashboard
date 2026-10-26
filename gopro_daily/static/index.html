@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101317">
+  <title>GoPro Daily</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#workspace">Skip to workspace</a>
+
+<header class="topbar">
+  <a class="brand" href="#workspace" aria-label="GoPro Daily home">
+    <span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <span>
+      <strong>GoPro Daily</strong>
+      <small>Turn a day of footage into one finished film</small>
+    </span>
+  </a>
+  <div class="topbar-actions">
+    <span id="save-state" class="save-state" role="status" aria-live="polite"></span>
+    <button id="btn-doctor" class="button quiet" type="button">System check</button>
+    <button id="btn-reset" class="button quiet" type="button">Reset settings</button>
+  </div>
+</header>
+
+<div class="app-shell">
+  <aside class="settings-panel" aria-label="Project settings">
+    <div class="settings-heading">
+      <span class="eyebrow">Project</span>
+      <h2>Settings</h2>
+      <p>Start with the essentials. Fine-tune when you need to.</p>
+    </div>
+    <div class="settings-search-tools">
+      <label class="sr-only" for="settings-search">Search all settings</label>
+      <div class="settings-search-row">
+        <input id="settings-search" type="search" placeholder="Search all settings…" aria-controls="settings" aria-describedby="settings-search-status">
+        <button id="settings-search-clear" class="button quiet compact" type="button" hidden>Clear</button>
+      </div>
+      <p id="settings-search-status" role="status" aria-live="polite"></p>
+    </div>
+    <div class="settings" id="settings"></div>
+  </aside>
+
+  <main class="workspace" id="workspace">
+    <section class="welcome" aria-labelledby="page-title">
+      <div>
+        <span class="eyebrow">New export</span>
+        <h1 id="page-title">Build your daily film</h1>
+        <p>Choose your footage, pick the films you want and export. The overlay layout is always one click away.</p>
+      </div>
+      <ol class="steps" aria-label="Workflow">
+        <li class="active"><span>1</span> Footage</li>
+        <li><span>2</span> Export</li>
+      </ol>
+    </section>
+
+    <section class="card" id="footage-card" aria-labelledby="footage-title">
+      <div class="card-head">
+        <div class="title-group">
+          <span class="step-number">1</span>
+          <div>
+            <h2 id="footage-title">Review footage</h2>
+            <p>Scan the source folder and choose the films you want to create.</p>
+          </div>
+        </div>
+        <button id="btn-scan" class="button primary" type="button"><span aria-hidden="true">⌕</span> Scan folder</button>
+      </div>
+      <div id="source-slot" class="source-slot"></div>
+      <div id="scan-feedback" class="inline-alert error" role="alert" hidden></div>
+      <div id="scan-summary" class="empty-state" hidden></div>
+      <div id="groups-toolbar" class="groups-toolbar" hidden>
+        <label class="check select-all"><input type="checkbox" id="select-all" checked> <span>Select all</span></label>
+        <span id="selection-count" class="selection-count" aria-live="polite"></span>
+        <span class="spacer"></span>
+        <label class="search-field">
+          <span class="sr-only">Filter scanned footage</span>
+          <span aria-hidden="true">⌕</span>
+          <input id="group-filter" type="search" placeholder="Filter days or files…">
+        </label>
+        <button id="btn-expand-groups" class="button quiet compact" type="button">Expand all</button>
+      </div>
+      <div id="groups"></div>
+      <div id="export-bar" class="card-action" hidden>
+        <div>
+          <strong id="process-title">Ready to export?</strong>
+          <span id="process-hint">Select at least one film.</span>
+          <span id="process-overlay" class="process-overlay"></span>
+        </div>
+        <button id="btn-process" class="button primary large" type="button" disabled>Process selected</button>
+      </div>
+    </section>
+
+    <section class="card" id="jobs-card" aria-labelledby="jobs-title">
+      <div class="card-head">
+        <div class="title-group">
+          <span class="step-number">2</span>
+          <div>
+            <h2 id="jobs-title">Export queue</h2>
+            <p>Follow progress or reveal completed films in Finder.</p>
+          </div>
+        </div>
+        <button id="btn-clear" class="button quiet" type="button" disabled>Clear finished</button>
+      </div>
+      <div id="jobs" class="empty-state compact-empty" aria-live="polite">
+        <span class="empty-icon" aria-hidden="true">↗</span>
+        <strong>No exports yet</strong>
+        <p>Completed and active jobs will appear here.</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="layout-dialog" class="layout-dialog" aria-labelledby="layout-title" onclose="closeWidgetDetail(true)">
+  <div class="dialog-head">
+    <div><span class="eyebrow">Overlay</span><h3 id="layout-title">Arrange the layout</h3></div>
+    <div class="dialog-head-actions">
+      <label class="resolution-field">
+        <span>Preview</span>
+        <select id="preview-res">
+          <option value="1920x1080">1080p · 16:9</option>
+          <option value="2704x1520">2.7K · 16:9</option>
+          <option value="3840x2160" selected>4K · 16:9</option>
+          <option value="4000x3000">4K · 4:3</option>
+          <option value="5312x2988">5.3K · 16:9</option>
+        </select>
+      </label>
+      <button class="icon-button" type="button" onclick="this.closest('dialog').close()" aria-label="Close layout editor">×</button>
+    </div>
+  </div>
+  <div class="layout-body">
+    <aside id="widget-panel" class="widget-panel" aria-label="Widgets"></aside>
+    <div class="layout-stage">
+      <div class="preview-wrap"><svg id="preview" class="overlay-svg" xmlns="http://www.w3.org/2000/svg" tabindex="0" role="img" aria-label="Interactive overlay preview"></svg></div>
+    </div>
+  </div>
+  <div class="layout-foot">
+    <p>Drag to move, drag the corner to resize, arrow keys to nudge (Shift for bigger steps), double-click to send back to its corner. Layout scales to every resolution; map tiles are placeholders.</p>
+    <span class="save-hint">Changes save automatically</span>
+    <button class="button primary" type="button" onclick="this.closest('dialog').close()">Done</button>
+  </div>
+</dialog>
+
+<dialog id="editor-dialog" class="editor-dialog" aria-labelledby="editor-title">
+  <div class="dialog-head">
+    <div><span class="eyebrow">Edit film</span><h3 id="editor-title">Footage</h3><p id="editor-meta" class="editor-meta"></p></div>
+    <div class="dialog-head-actions">
+      <span id="editor-save" class="save-hint" role="status" aria-live="polite"></span>
+      <button id="editor-reset" class="button quiet compact" type="button" title="Put every clip back whole">Reset edits</button>
+      <button class="icon-button" type="button" onclick="this.closest('dialog').close()" aria-label="Close editor">×</button>
+    </div>
+  </div>
+  <div class="editor-stage">
+    <video id="editor-video" playsinline preload="auto"></video>
+    <span id="editor-clock" class="editor-clock" title="Time of day when this was filmed"></span>
+    <span id="editor-removed" class="editor-removed" hidden>Left out of the film</span>
+  </div>
+  <div class="editor-bar">
+    <div class="ed-group" data-bar="transport" role="group" aria-label="Playback"></div>
+    <span id="editor-time" class="editor-time"></span>
+    <span id="editor-clip" class="editor-clip muted"></span>
+    <span class="spacer"></span>
+    <div class="ed-group" data-bar="audio"></div>
+    <div id="editor-speeds" class="editor-speeds" role="group" aria-label="Playback speed"></div>
+  </div>
+  <div class="editor-bar tools" role="toolbar" aria-label="Editing tools">
+    <div class="ed-group" data-bar="edit"></div>
+    <span class="ed-sep" aria-hidden="true"></span>
+    <div class="ed-group" data-bar="history"></div>
+    <span id="editor-hint" class="editor-hint" role="status" aria-live="polite"></span>
+    <span class="spacer"></span>
+    <div class="ed-group" data-bar="playback-mode"></div>
+    <span class="ed-sep" aria-hidden="true"></span>
+    <div class="ed-group ed-zoom" role="group" aria-labelledby="editor-zoom-label">
+      <span id="editor-zoom-label" class="ed-caption">Zoom</span>
+      <div class="ed-group" data-bar="zoom"></div>
+    </div>
+  </div>
+  <div id="editor-timeline" class="tl"></div>
+  <div id="editor-clips" class="editor-clips" aria-label="Clips in this film"></div>
+  <p id="editor-keys" class="editor-foot"></p>
+</dialog>
+
+<dialog id="log-dialog">
+  <div class="dialog-head">
+    <div><span class="eyebrow">Export details</span><h3 id="log-title">Log</h3></div>
+    <button class="icon-button" type="button" onclick="this.closest('dialog').close()" aria-label="Close log">×</button>
+  </div>
+  <pre id="log-body"></pre>
+</dialog>
+
+<dialog id="doctor-dialog">
+  <div class="dialog-head">
+    <div><span class="eyebrow">Diagnostics</span><h3>System check</h3></div>
+    <button class="icon-button" type="button" onclick="this.closest('dialog').close()" aria-label="Close system check">×</button>
+  </div>
+  <p class="dialog-intro">Checks the tools and settings needed to render your films.</p>
+  <ul id="doctor-body" class="doctor"></ul>
+</dialog>
+
+<div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+<script src="/static/preview.js"></script>
+<script src="/static/app.js"></script>
+<script type="module" src="/static/editor/index.js"></script>
+</body>
+</html>
