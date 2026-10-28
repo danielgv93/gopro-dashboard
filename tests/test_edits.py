@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from gopro_daily.config import AppConfig
-from gopro_daily.edits import Cut, EditStore, FilmEdit, make_edit, plan_pieces, resolve_cuts
+from gopro_daily.edits import Cut, EditStore, FilmEdit, make_edit, plan_pieces, plan_units, resolve_cuts
 from gopro_daily.jobs import Job
 from gopro_daily.scanner import Chapter, Group, Recording, group_recordings
 
@@ -100,3 +100,48 @@ def test_job_reports_speed_and_finish_time(monkeypatch):
     assert job.tasks[task]["speed"] == pytest.approx(seconds * 0.5 / 2)
     job.set_progress(task, "overlay", 1.0)
     assert job.tasks[task]["finished"] == 104.0
+
+
+# ----------------------------------------------------------------------------- per-chapter units
+
+
+def chaptered(*durations: float) -> Recording:
+    r = rec(1, "2026-07-01T08:00:00", duration=sum(durations))
+    r.chapters = [Chapter(path=Path(f"/sd/GX{n:02d}0001.MP4"), chapter=n, size=100, duration=d)
+                  for n, d in enumerate(durations, 1)]
+    return r
+
+
+def units_of(r: Recording, start: float | None = None, end: float | None = None):
+    group = film(r)
+    edit = None if start is None else make_edit(group, [Cut(rec=A, start=start, end=end)])
+    return [[(s.chapter.chapter, s.start, s.end) for s in u.spans] for u in plan_units(plan_pieces(group, edit))]
+
+
+def test_unedited_recording_renders_one_full_unit_per_chapter():
+    group = film(chaptered(100, 100, 50))
+    units = plan_units(plan_pieces(group, None))
+    assert [[(s.chapter.chapter, s.start, s.end) for s in u.spans] for u in units] == [
+        [(1, 0, 100)], [(2, 0, 100)], [(3, 0, 50)]]
+    assert all(u.full for u in units)
+
+
+def test_piece_inside_one_chapter_is_one_partial_unit():
+    assert units_of(chaptered(100, 100), 120, 150) == [[(2, 20, 50)]]
+
+
+def test_piece_across_boundaries_is_tail_full_middle_head():
+    assert units_of(chaptered(100, 100, 100), 60, 230) == [[(1, 60, 100)], [(2, 0, 100)], [(3, 0, 30)]]
+
+
+def test_short_tail_is_merged_into_its_neighbour():
+    # 2 s of chapter 3 after a whole chapter 2: too short for the overlay renderer on its own
+    assert units_of(chaptered(100, 100, 100), 60, 202) == [[(1, 60, 100)], [(2, 0, 100), (3, 0, 2)]]
+    # a short first unit merges into the next one
+    assert units_of(chaptered(100, 100), 97, 150) == [[(1, 97, 100), (2, 0, 50)]]
+
+
+def test_one_chapter_recording_is_one_unit():
+    group = film(rec(1, "2026-07-01T08:00:00"))
+    units = plan_units(plan_pieces(group, None))
+    assert len(units) == 1 and units[0].full and units[0].duration == 60

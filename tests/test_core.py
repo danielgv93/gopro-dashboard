@@ -217,3 +217,61 @@ def test_text_box_matches_font_metrics():
     dt = next(x for x in build_widgets(config, 1920, 1080) if x.key == "datetime")
     width, _, _ = text_metrics(config.font, config.datetime.font_size, dt.texts[1].text)
     assert dt.w >= width
+
+
+# ------------------------------------------------------------------------------------------------ per-chapter export
+
+
+def test_overlay_export_renders_each_chapter_and_concats_in_film_order(tmp_path: Path, monkeypatch):
+    from gopro_daily import pipeline
+    from gopro_daily.edits import Cut, make_edit, plan_pieces
+
+    chapters = []
+    for n, d in enumerate([30, 40, 20], 1):
+        (tmp_path / f"GH{n:02d}0001.MP4").write_bytes(b"")
+        chapters.append(Chapter(path=tmp_path / f"GH{n:02d}0001.MP4", chapter=n, size=100, duration=d))
+    r = rec(1, "2026-07-01T08:00:00")
+    r.chapters, r.duration, r.has_gpmd = chapters, 90, True
+    config = AppConfig()
+    config.output.output_dir, config.output.work_dir = str(tmp_path / "out"), str(tmp_path / "work")
+    config.overlay.journey_map.enabled = False
+    group = group_recordings([r], config)[0]
+
+    rendered, cut, concat = [], [], []
+
+    def render(src, rec_, dest, layout, config_, ctx, task, config_dir):
+        rendered.append(src)
+        ctx.progress(task, "overlay", 0.5)
+        return dest
+
+    monkeypatch.setattr(pipeline, "render_overlay", render)
+    monkeypatch.setattr(pipeline, "cut_piece", lambda src, span, dest, *_: cut.append((src.name, span.start, span.end)) or dest)
+    monkeypatch.setattr(pipeline, "concat_products",
+                        lambda products, dest, *a, **k: concat.append(products) or dest.write_bytes(b""))
+    progress: list[tuple] = []
+    ctx = Context(log=lambda _: None, progress=lambda *a: progress.append(a), cancel_event=threading.Event(),
+                  processes=set(), lock=threading.Lock())
+
+    process_group(group, config, ctx)
+    assert set(rendered) == {c.path for c in chapters}  # whole chapters straight from the source, no join, no cut
+    assert cut == []
+    assert [p.name for p in concat[0]] == ["H0001_000_overlay.mp4", "H0001_001_overlay.mp4", "H0001_002_overlay.mp4"]
+    overlay = [f for task, stage, f in progress if stage == "overlay"]
+    assert overlay == sorted(overlay) and overlay[-1] == 1.0  # the piece moves forward through its chapters
+
+    rendered.clear(), concat.clear()
+    config.output.overwrite = True
+    process_group(group, config, ctx, plan_pieces(group, make_edit(group, [Cut(rec=r.key, start=20, end=80)])))
+    assert sorted(cut) == [("GH010001.MP4", 20, 30), ("GH030001.MP4", 0, 10)]
+    assert {p.name for p in rendered} == {"H0001_000_cut0.mp4", "GH020001.MP4", "H0001_002_cut0.mp4"}
+
+
+def test_overlay_profile_ends_with_the_video(tmp_path: Path):
+    # plain `overlay` outlives the video when the 10 fps overlay stream is longer: +1 frame at every unit join
+    import json
+
+    from gopro_daily.pipeline import PROFILE_NAME, write_ffmpeg_profile
+
+    write_ffmpeg_profile(AppConfig(), tmp_path)
+    profile = json.loads((tmp_path / "ffmpeg-profiles.json").read_text())[PROFILE_NAME]
+    assert profile["filter"] == "[1:v]tpad=stop=-1:stop_mode=clone[ov];[0:v][ov]overlay=shortest=1"

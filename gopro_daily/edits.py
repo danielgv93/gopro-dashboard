@@ -4,6 +4,7 @@ An edit is an edit decision list (EDL): a list of cuts, each one a kept range of
 the start of that recording (all its chapters joined). Everything outside the cuts is left out of the film.
 
     stored edit (FilmEdit)  --resolve_cuts-->  cuts shown in the editor  --plan_pieces-->  Pieces the pipeline renders
+                                                                            --plan_units-->   Units (overlay export)
 
 Edits are keyed by group key and stored next to config.json, so they survive restarts and rescans. They are resolved
 against the current scan every time: cuts of recordings that no longer exist are dropped, and recordings that appeared
@@ -20,7 +21,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, model_validator
 
 from .config import PROJECT_ROOT
-from .scanner import Group, Recording
+from .scanner import Chapter, Group, Recording
 
 EDITS_PATH = PROJECT_ROOT / "edits.json"
 MIN_CUT_SECONDS = 0.2  # shorter cuts are dropped: a lossless cut cannot be that short anyway
@@ -67,6 +68,42 @@ class Piece:
     @property
     def id(self) -> str:
         return self.rec.key if self.full else f"{self.rec.key}@{self.start:.2f}"
+
+
+@dataclass(frozen=True, eq=False)
+class Span:
+    """A range of one chapter file, in seconds inside that file."""
+
+    chapter: Chapter
+    start: float
+    end: float
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+    @property
+    def full(self) -> bool:
+        return self.start <= MERGE_GAP_SECONDS and self.end >= self.chapter.duration - MERGE_GAP_SECONDS
+
+
+@dataclass(frozen=True, eq=False)
+class Unit:
+    """What one overlay render works on: usually one chapter range. Units of a piece are contiguous, in film order.
+
+    A unit has several spans only when a range shorter than OVERLAY_MIN_SECONDS was merged into its neighbour."""
+
+    piece: Piece
+    spans: tuple[Span, ...]
+
+    @property
+    def duration(self) -> float:
+        return sum(s.duration for s in self.spans)
+
+    @property
+    def full(self) -> bool:
+        """True when the unit is a whole chapter, so the pipeline renders the chapter file as is."""
+        return len(self.spans) == 1 and self.spans[0].full
 
 
 # ----------------------------------------------------------------------------- resolving
@@ -122,6 +159,29 @@ def plan_pieces(group: Group, edit: FilmEdit | None) -> list[Piece]:
         else:
             pieces.append(Piece(rec, cut.start, cut.end))
     return pieces
+
+
+def plan_units(pieces: list[Piece]) -> list[Unit]:
+    """Splits every piece at its recording's chapter boundaries, so each chapter renders on its own (in parallel,
+    straight from the source). Ranges shorter than OVERLAY_MIN_SECONDS are merged into a neighbour of the same piece,
+    because the overlay renderer crashes on them."""
+    units: list[Unit] = []
+    for piece in pieces:
+        groups: list[list[Span]] = []
+        offset = 0.0
+        for chapter in piece.rec.chapters:
+            start, end = max(piece.start, offset), min(piece.end, offset + chapter.duration)
+            if end - start > MERGE_GAP_SECONDS:
+                groups.append([Span(chapter, start - offset, end - offset)])
+            offset += chapter.duration
+        while len(groups) > 1:
+            short = next((i for i, g in enumerate(groups) if sum(s.duration for s in g) < OVERLAY_MIN_SECONDS), None)
+            if short is None:
+                break
+            lo = short - 1 if short > 0 else 0  # merge into the previous unit, or into the next one for the first
+            groups[lo:lo + 2] = [groups[lo] + groups[lo + 1]]
+        units += [Unit(piece, tuple(g)) for g in groups]
+    return units
 
 
 def edit_summary(group: Group, edit: FilmEdit | None) -> dict:

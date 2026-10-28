@@ -1,14 +1,18 @@
 """Processing pipeline for one output group (a day by default).
 
-Per recording:  join chapters (lossless, keeps GPS telemetry)
-Per piece:      cut the kept range out of the joined recording (lossless, only when the film was edited)
-                ->  render overlay (optional, re-encodes)
-Per group:      concatenate the pieces in chronological order (lossless when formats match).
+Overlay off (never touches the encoder):
+    Per recording:  join chapters (lossless, keeps GPS telemetry)
+    Per piece:      cut the kept range out of the joined recording (lossless, only when the film was edited)
+Overlay on (keeps the single hardware encoder busy, see docs/design/per-chapter-export.md):
+    Per unit:       cut the kept range out of its chapter file (lossless, only for partial chapters)
+                    ->  render overlay (re-encodes), units in parallel, straight from the source
+Per group:          concatenate the pieces / units in chronological order (lossless when formats match).
 
-A piece is a kept range of a recording (see edits.py). Unedited films have one whole-recording piece per recording.
+A piece is a kept range of a recording, a unit is a piece's range of one chapter (see edits.py). Unedited films have
+one whole-recording piece per recording, and one whole-chapter unit per chapter.
 
-The overlay is rendered per recording on purpose: each recording carries its own GPS track, so the
-date/time and map stay exact even when there are hours between recordings of the same day.
+Each recording's GPMD carries its own GPS clock, so the date/time and map stay exact even when there are hours between
+recordings of the same day, and across the chapters of one recording.
 """
 
 from __future__ import annotations
@@ -21,13 +25,13 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from .config import PROJECT_ROOT, AppConfig
-from .edits import OVERLAY_MIN_SECONDS, Piece, plan_pieces
+from .edits import OVERLAY_MIN_SECONDS, Piece, Span, Unit, plan_pieces, plan_units
 from .layout import generate_layout
 from .scanner import Group, Recording, ffprobe_bin, probe
 from .track import extract_points, write_track
@@ -113,6 +117,9 @@ def write_ffmpeg_profile(config: AppConfig, config_dir: Path) -> None:
     profile = {
         PROFILE_NAME: {
             "input": input_args(config),
+            # The 10 fps overlay stream usually ends after the video, and plain `overlay` then repeats the last video
+            # frame (+1 frame and an audio gap at every unit join). Padding it forever + shortest=1 ends at the video.
+            "filter": "[1:v]tpad=stop=-1:stop_mode=clone[ov];[0:v][ov]overlay=shortest=1",
             "output": [*video_encode_args(config), *audio_encode_args(config)],
         }
     }
@@ -204,8 +211,8 @@ def join_chapters(rec: Recording, dest: Path, config: AppConfig, ctx: Context, t
     return dest
 
 
-def cut_piece(src: Path, piece: Piece, dest: Path, config: AppConfig, ctx: Context) -> Path:
-    """Lossless cut of a piece out of its joined recording, keeping the GPS stream.
+def cut_piece(src: Path, piece: Piece | Span, dest: Path, config: AppConfig, ctx: Context) -> Path:
+    """Lossless cut of a piece out of its joined recording (or a span out of its chapter), keeping the GPS stream.
 
     Streams are copied, so the in-point snaps back to the keyframe before it (GoPro writes one about every second)
     and the out-point is exact. `-avoid_negative_ts make_zero` turns that pre-roll into real frames instead of an
@@ -259,12 +266,21 @@ def render_overlay(src: Path, rec: Recording, dest: Path, layout_xml: Path, conf
     return dest
 
 
+def encode_plain(src: Path, dest: Path, config: AppConfig, ctx: Context, task: str, duration: float) -> Path:
+    """Re-encodes without overlay, with the overlay's encoder. A unit that falls back must not be a copy of the camera's
+    stream: a file that mixes it with VideoToolbox output does not play in Apple apps."""
+    run([ffmpeg_bin(config), "-hide_banner", "-y", "-nostats", "-progress", "pipe:1", *input_args(config),
+         "-i", str(src), "-map", "0:v:0", "-map", "0:a?", *video_encode_args(config), *audio_encode_args(config),
+         str(dest)], ctx, ffmpeg_progress(ctx, task, "overlay", duration))
+    return dest
+
+
 def concat_products(products: list[Path], dest: Path, config: AppConfig, ctx: Context, total: float,
-                    keep_telemetry: bool) -> None:
+                    keep_telemetry: bool, progress: Callable[[str], None] | None = None) -> None:
     ffmpeg = ffmpeg_bin(config)
     infos = [probe(p, ffprobe_bin(config)) for p in products]
     signatures = {_signature(i) for i in infos}
-    progress = ffmpeg_progress(ctx, "group", "concat", total)
+    progress = progress or ffmpeg_progress(ctx, "group", "concat", total)
     tmp = dest.with_name(dest.stem + ".partial" + dest.suffix)
 
     if len(signatures) == 1:
@@ -381,45 +397,100 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
     piece_name = lambda i, p: name_of(p.rec) if p.full else f"{name_of(p.rec)}_{i:02d}"  # noqa: E731
 
     try:
-        # 1. join chapters (lossless), only for recordings that still have something in the film ---------------
-        def join(rec: Recording) -> Path:
-            ctx.log(f"[{name_of(rec)}] {len(rec.chapters)} chapter(s), {rec.duration / 60:.1f} min")
-            return join_chapters(rec, work / f"{name_of(rec)}_joined.mp4", config, ctx, rec.key)
+        if overlay_on:
+            products = _overlay_units(pieces, recordings, work, config_dir, config, ctx, parallel)
+        else:
+            # 1. join chapters (lossless), only for recordings that still have something in the film -----------
+            def join(rec: Recording) -> Path:
+                ctx.log(f"[{name_of(rec)}] {len(rec.chapters)} chapter(s), {rec.duration / 60:.1f} min")
+                return join_chapters(rec, work / f"{name_of(rec)}_joined.mp4", config, ctx, rec.key)
 
-        joined = dict(zip([r.key for r in recordings], parallel(join, recordings)))
+            joined = dict(zip([r.key for r in recordings], parallel(join, recordings)))
 
-        # 2. cut the kept ranges out of the joined recordings (lossless) ---------------------------------------
-        def cut(item: tuple[int, Piece]) -> Path:
-            i, piece = item
-            src = joined[piece.rec.key]
-            if not piece.full:
-                ctx.log(f"[{name_of(piece.rec)}] keeping {piece.start:.1f}s–{piece.end:.1f}s")
-                src = cut_piece(src, piece, work / f"{piece_name(i, piece)}_cut.mp4", config, ctx)
-            ctx.progress(piece.id, "join", 1.0)
-            return src
-
-        sources = parallel(cut, list(enumerate(pieces)))
-
-        # 3. GPS track shared by the whole group (continuous, progressive journey map) -------------------------
-        tracks: dict[str, Path] = {}
-        if overlay_on and config.overlay.layout_mode == "generated" and config.overlay.journey_map.enabled:
-            tracks = build_tracks(recordings, joined, work, config, ctx, parallel)
-
-        # 4. overlay per piece ---------------------------------------------------------------------------------
-        def overlay(item: tuple[int, Piece, Path]) -> Path:
-            i, piece, src = item
-            rec, name, task = piece.rec, piece_name(i, piece), piece.id
-            if not overlay_on:
+            # 2. cut the kept ranges out of the joined recordings (lossless) -----------------------------------
+            def cut(item: tuple[int, Piece]) -> Path:
+                i, piece = item
+                src = joined[piece.rec.key]
+                if not piece.full:
+                    ctx.log(f"[{name_of(piece.rec)}] keeping {piece.start:.1f}s–{piece.end:.1f}s")
+                    src = cut_piece(src, piece, work / f"{piece_name(i, piece)}_cut.mp4", config, ctx)
+                ctx.progress(piece.id, "join", 1.0)
                 return src
-            if not rec.has_gpmd and config.overlay.fallback_without_overlay:
-                ctx.log(f"[{name}] no GPS telemetry stream -> keeping it without overlay")
-                return src
-            if piece.duration < OVERLAY_MIN_SECONDS:
-                message = f"[{name}] cut shorter than {OVERLAY_MIN_SECONDS:g} s: too little GPS for the overlay renderer"
-                if not config.overlay.fallback_without_overlay:
-                    raise StepFailed(message)
-                ctx.log(f"{message} -> keeping it without overlay")
-                return src
+
+            products = parallel(cut, list(enumerate(pieces)))
+
+        ctx.log(f"Concatenating {len(products)} part(s) -> {dest}")
+        concat_products(products, dest, config, ctx, sum(p.duration for p in pieces), keep_telemetry=not overlay_on)
+        ctx.progress("group", "concat", 1.0)
+        _copy_times(recordings[0].chapters[0].path, dest)
+    finally:
+        _cleanup(work, base_work, config)
+    return dest
+
+
+def _overlay_units(pieces: list[Piece], recordings: list[Recording], work: Path, config_dir: Path, config: AppConfig,
+                   ctx: Context, parallel) -> list[Path]:
+    """Renders the overlay per chapter unit, in parallel and straight from the source files. Returns the rendered
+    units in film order (`parallel` keeps the order of its items)."""
+    units = plan_units(pieces)
+    name_of = lambda u: f"{u.piece.rec.letter}{u.piece.rec.number:04d}"  # noqa: E731
+    unit_name = lambda i, u: f"{name_of(u)}_{i:03d}"  # noqa: E731
+
+    # 1. cut only the partial units (lossless); whole chapters are rendered from the chapter file as is ----------
+    def prepare(item: tuple[int, Unit]) -> Path:
+        i, unit = item
+        if unit.full:
+            return unit.spans[0].chapter.path
+        name = unit_name(i, unit)
+        ctx.log(f"[{name}] keeping " + ", ".join(f"{s.chapter.path.name} {s.start:.1f}s–{s.end:.1f}s" for s in unit.spans))
+        # Every span is cut, even a whole chapter, so all parts share one stream layout for the concat demuxer.
+        parts = [cut_piece(s.chapter.path, s, work / f"{name}_cut{n}.mp4", config, ctx) for n, s in enumerate(unit.spans)]
+        if len(parts) == 1:
+            return parts[0]
+        dest = work / f"{name}_cut.mp4"
+        concat_products(parts, dest, config, ctx, unit.duration, keep_telemetry=True, progress=lambda _: None)
+        return dest
+
+    for rec in recordings:
+        ctx.log(f"[{rec.letter}{rec.number:04d}] {len(rec.chapters)} chapter(s), {rec.duration / 60:.1f} min")
+    sources = parallel(prepare, list(enumerate(units)))
+    for piece in pieces:
+        ctx.progress(piece.id, "join", 1.0)
+
+    # 2. GPS track shared by the whole group (continuous, progressive journey map) -------------------------------
+    tracks: dict[str, Path] = {}
+    if config.overlay.layout_mode == "generated" and config.overlay.journey_map.enabled:
+        tracks = build_tracks(recordings, work, config, ctx, parallel)
+
+    # 3. overlay per unit; its progress is summed into its piece's task, which is what the job view shows ---------
+    done: dict[int, float] = {}  # unit index -> footage seconds rendered
+    finished: set[int] = set()
+
+    def report(i: int, unit: Unit, fraction: float) -> None:
+        done[i] = min(1.0, fraction) * unit.duration
+        siblings = [j for j, u in enumerate(units) if u.piece is unit.piece]
+        if all(j in finished for j in siblings):
+            ctx.progress(unit.piece.id, "overlay", 1.0)  # exact, so the task is marked finished
+        else:
+            ctx.progress(unit.piece.id, "overlay", min(1.0, sum(done.get(j, 0.0) for j in siblings) / unit.piece.duration))
+
+    def overlay(item: tuple[int, Unit, Path]) -> Path:
+        i, unit, src = item
+        rec, name = unit.piece.rec, unit_name(i, unit)
+        uctx = replace(ctx, progress=lambda _task, _stage, fraction: report(i, unit, fraction))
+
+        def plain(reason: str) -> Path:
+            ctx.log(f"[{name}] {reason} -> keeping it without overlay")
+            return encode_plain(src, work / f"{name}_plain.mp4", config, uctx, name, unit.duration)
+
+        if not rec.has_gpmd and config.overlay.fallback_without_overlay:
+            rendered = plain("no GPS telemetry stream")
+        elif unit.duration < OVERLAY_MIN_SECONDS:
+            message = f"cut shorter than {OVERLAY_MIN_SECONDS:g} s: too little GPS for the overlay renderer"
+            if not config.overlay.fallback_without_overlay:
+                raise StepFailed(f"[{name}] {message}")
+            rendered = plain(message)
+        else:
             layout_xml = work / f"{name}_layout.xml"
             if config.overlay.layout_mode == "xml":
                 shutil.copy(Path(config.overlay.layout_xml_path).expanduser(), layout_xml)
@@ -428,25 +499,17 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
                 layout_xml.write_text(
                     generate_layout(config.overlay, rec.width, rec.height, str(track) if track else None))
             try:
-                rendered = render_overlay(src, rec, work / f"{name}_overlay.mp4", layout_xml, config, ctx, task,
+                rendered = render_overlay(src, rec, work / f"{name}_overlay.mp4", layout_xml, config, uctx, name,
                                           config_dir)
             except StepFailed as e:
                 if not config.overlay.fallback_without_overlay:
                     raise
-                ctx.log(f"[{name}] overlay failed ({e}) -> keeping it without overlay")
-                return src
-            ctx.progress(task, "overlay", 1.0)
-            return rendered
+                rendered = plain(f"overlay failed ({e})")
+        finished.add(i)
+        report(i, unit, 1.0)
+        return rendered
 
-        products = parallel(overlay, [(i, p, src) for (i, p), src in zip(enumerate(pieces), sources)])
-
-        ctx.log(f"Concatenating {len(products)} piece(s) -> {dest}")
-        concat_products(products, dest, config, ctx, sum(p.duration for p in pieces), keep_telemetry=not overlay_on)
-        ctx.progress("group", "concat", 1.0)
-        _copy_times(recordings[0].chapters[0].path, dest)
-    finally:
-        _cleanup(work, base_work, config)
-    return dest
+    return parallel(overlay, [(i, u, src) for (i, u), src in zip(enumerate(units), sources)])
 
 
 def work_root(config: AppConfig) -> Path:
@@ -467,22 +530,26 @@ def _cleanup(work: Path, base_work: Path, config: AppConfig) -> None:
         pass
 
 
-def build_tracks(recordings: list[Recording], joined: dict[str, Path], work: Path, config: AppConfig, ctx: Context,
+def build_tracks(recordings: list[Recording], work: Path, config: AppConfig, ctx: Context,
                  parallel) -> dict[str, Path]:
-    """Extracts every recording's GPS and writes the track file(s) the journey map widget draws from."""
+    """Extracts every chapter's GPS (in parallel) and writes the track file(s) the journey map widget draws from."""
+    chapters = [(rec, ch) for rec in recordings if rec.has_gpmd for ch in rec.chapters]
 
-    def extract(rec: Recording) -> list:
-        if not rec.has_gpmd:
-            return []
+    def extract(item) -> list:
+        rec, chapter = item
         try:
-            points = extract_points(joined[rec.key], config)
+            return extract_points(chapter.path, config)
         except Exception as e:  # noqa: BLE001 - a broken GPS stream must not kill the whole day
-            ctx.log(f"[{rec.letter}{rec.number:04d}] could not read GPS for the journey map: {e}")
+            ctx.log(f"[{rec.letter}{rec.number:04d}] could not read GPS of {chapter.path.name} for the journey map: {e}")
             return []
-        ctx.log(f"[{rec.letter}{rec.number:04d}] {len(points)} GPS points for the journey map")
-        return points
 
-    segments = parallel(extract, recordings)
+    by_rec: dict[str, list] = {}
+    for (rec, _), points in zip(chapters, parallel(extract, chapters)):
+        by_rec.setdefault(rec.key, []).extend(points)
+    segments = [by_rec.get(rec.key, []) for rec in recordings]
+    for rec, points in zip(recordings, segments):
+        if rec.has_gpmd:
+            ctx.log(f"[{rec.letter}{rec.number:04d}] {len(points)} GPS points for the journey map")
     if config.overlay.journey_map.scope == "recording":
         tracks = {}
         for rec, points in zip(recordings, segments):
