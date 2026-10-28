@@ -235,6 +235,66 @@ button.danger { color: var(--bad); }
 .bar > div { height: 100%; background: var(--accent); border-radius: inherit; transition: width .5s; }
 .job.done .bar > div { background: var(--ok); }
 .job.failed .bar > div { background: var(--bad); }
+.job-live { display: grid; gap: 14px; margin-top: 14px; }
+.job-hero { display: grid; grid-template-columns: 96px 1fr; gap: 18px; align-items: center; }
+.job-hero-main { display: grid; gap: 12px; min-width: 0; }
+.job-ring { position: relative; width: 96px; height: 96px; }
+.job-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.job-ring circle { fill: none; stroke-width: 7; }
+.ring-track { stroke: var(--bar); }
+.ring-fill { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .6s; }
+.job-ring b { position: absolute; inset: 0; display: grid; place-items: center; font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.job-ring b small { font-size: 12px; font-weight: 700; color: var(--muted); }
+.job-ring b { grid-auto-flow: column; align-content: center; justify-content: center; align-items: baseline; }
+.job-phases { display: flex; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 11.5px; font-weight: 650; color: var(--muted); flex-wrap: wrap; }
+.job-phases li { display: flex; align-items: center; gap: 6px; }
+.job-phases li + li::before { content: ""; width: 22px; height: 2px; border-radius: 2px; background: var(--bar); }
+.job-phases li.done + li::before { background: var(--ok); }
+.phase-dot { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 99px; background: var(--bar); color: var(--muted-strong); font-size: 10px; font-weight: 800; }
+.job-phases .done { color: var(--muted-strong); }
+.job-phases .done .phase-dot { background: var(--ok-soft); color: var(--ok); }
+.job-phases .current { color: var(--text); }
+.job-phases .current .phase-dot { background: var(--accent); color: var(--accent-text); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 8%, transparent); } }
+.job-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.job-stats.done { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 12px; }
+.job-stat { padding: 8px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); min-width: 0; }
+.job-stat b { display: block; font-size: 15px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job-stat span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.job-stat.accent b { color: var(--accent); }
+.job.done .job-stat.accent b { color: var(--ok); }
+.job-spark { padding: 10px 12px 6px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); }
+.spark-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; font-variant-numeric: tabular-nums; }
+.spark-chart svg { display: block; width: 100%; height: 44px; margin-top: 4px; }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.spark-area { fill: color-mix(in srgb, var(--accent) 14%, transparent); stroke: none; }
+.lanes { display: grid; gap: 7px; }
+.lanes-head { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; flex-wrap: wrap; }
+.lanes-legend { display: flex; gap: 12px; }
+.lanes-legend .dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; vertical-align: 0; }
+.dot.run { background: var(--accent); }
+.dot.ok { background: var(--ok); }
+.lane { display: grid; grid-template-columns: minmax(70px, 150px) 1fr 38px 40px 92px; gap: 10px; align-items: center; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.lane-label { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lane-bar { display: flex; gap: 2px; height: 10px; }
+.seg { position: relative; overflow: hidden; border-radius: 3px; background: var(--bar); }
+.seg i { position: absolute; inset: 0 auto 0 0; background: var(--accent); transition: width .5s; }
+.seg-join i { background: color-mix(in srgb, var(--accent) 55%, var(--muted)); }
+.seg-concat i { background: var(--ok); }
+.seg.live i { background-image: linear-gradient(110deg, transparent 30%, rgb(255 255 255 / .35) 50%, transparent 70%); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }
+@keyframes shimmer { from { background-position: 150% 0; } to { background-position: -50% 0; } }
+.lane.done .seg i { background: var(--ok); }
+.lane-pct { text-align: right; font-weight: 700; }
+.lane.done .lane-pct { color: var(--ok); }
+.lane-speed { color: var(--accent); font-weight: 700; }
+.lane-stage { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lane.pending { opacity: .55; }
+@media (max-width: 640px) {
+  .job-hero { grid-template-columns: 1fr; justify-items: center; }
+  .job-stats, .job-stats.done { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lane { grid-template-columns: 70px 1fr 36px; }
+  .lane-speed, .lane-stage { display: none; }
+}
 .tasks { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .error { color: var(--bad); font-size: 12px; margin-top: 7px; white-space: pre-wrap; }
 .output-path { margin-top: 7px; overflow-wrap: anywhere; }

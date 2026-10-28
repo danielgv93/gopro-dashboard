@@ -1,6 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from gopro_daily.config import AppConfig
 from gopro_daily.edits import Cut, EditStore, FilmEdit, make_edit, plan_pieces, resolve_cuts
 from gopro_daily.jobs import Job
@@ -84,3 +86,17 @@ def test_store_round_trip(tmp_path: Path):
     assert EditStore(path).get("2026-07-01").cuts[0].end == 2
     store.delete("2026-07-01")
     assert EditStore(path).get("2026-07-01") is None
+
+
+def test_job_reports_speed_and_finish_time(monkeypatch):
+    group = film(rec(1, "2026-07-01T08:00:00"))
+    job = Job(group=group, config=AppConfig(), pieces=plan_pieces(group, None))
+    clock = iter([100.0, 102.0, 104.0])
+    monkeypatch.setattr("gopro_daily.jobs.time.time", lambda: next(clock))
+    task = next(k for k in job.tasks if k != "group")
+    seconds = job.tasks[task]["seconds"]
+    job.set_progress(task, "overlay", 0.0)
+    job.set_progress(task, "overlay", 0.5)
+    assert job.tasks[task]["speed"] == pytest.approx(seconds * 0.5 / 2)
+    job.set_progress(task, "overlay", 1.0)
+    assert job.tasks[task]["finished"] == 104.0

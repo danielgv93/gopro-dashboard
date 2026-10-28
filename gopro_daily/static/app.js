@@ -839,12 +839,114 @@ function renderJobs(jobs) {
         el("button", { class: "ghost", onclick: () => openLog(j) }, "View log"),
         j.status === "done" ? el("button", { class: "ghost", onclick: () => api("POST", "/api/reveal", { path: j.output }) }, "Show in Finder") : null,
         (j.status === "running" || j.status === "queued") ? el("button", { class: "ghost danger", onclick: async () => { await api("POST", `/api/jobs/${j.id}/cancel`); pollJobs(); } }, "Cancel") : null),
-      el("div", { class: "bar" }, el("div", { style: `width:${pct}%` })),
-      el("div", { class: "tasks" }, j.tasks.map(t => el("span", { class: "task" },
-        `${t.label}: ${t.stage}${t.stage !== "pending" ? ` ${Math.round(t.progress * 100)}%` : ""}`))),
+      j.status === "running" ? renderJobLive(j, elapsed, eta) : el("div", { class: "bar" }, el("div", { style: `width:${pct}%` })),
+      j.status === "done" ? renderJobDone(j, elapsed) : null,
       j.error ? el("div", { class: "error" }, j.error) : null,
       j.output && j.status === "done" ? el("div", { class: "muted small output-path" }, j.output) : null);
   }));
+}
+
+const PHASES = { join: "Join chapters", overlay: "Draw overlay", concat: "Final video" };
+const STAGE_WEIGHTS = { 1: [1], 2: [0.08, 0.92] };  // same split as Job.overall in jobs.py
+const fmtSpeed = x => x >= 10 ? `${Math.round(x)}×` : `${x.toFixed(1)}×`;
+const svgBox = (cls, markup, label) => {
+  const box = el("div", { class: cls, role: "img", "aria-label": label });
+  box.innerHTML = markup;  // numbers only, built below
+  return box;
+};
+
+// Footage seconds per wall-clock second between history samples (5 s apart).
+function throughput(history) {
+  const out = [];
+  for (let i = 1; i < history.length; i++) {
+    const [t0, d0] = history[i - 1], [t1, d1] = history[i];
+    if (t1 > t0) out.push(Math.max(0, (d1 - d0) / (t1 - t0)));
+  }
+  return out;
+}
+
+function renderJobLive(j, elapsed, eta) {
+  const pct = Math.round(j.progress * 100);
+  const pieces = j.tasks.filter(t => t.id !== "group");
+  const final = j.tasks.find(t => t.id === "group");
+  const phases = [...(j.overlay ? ["join", "overlay"] : ["join"]), "concat"];
+  // clips that fall back to no overlay never report it, so the final concat closes every earlier phase
+  const isDone = t => t.finished || (t.id !== "group" && final.stage === "concat");
+  const isWorking = t => !isDone(t) && t.stage !== "pending" && t.progress < 1;  // join done = waiting for overlay
+  const phaseDone = ph => ph === "concat" ? final.finished : final.stage === "concat" ||
+    pieces.every(t => t.stages.indexOf(t.stage) > t.stages.indexOf(ph) || (t.stage === ph && t.progress >= 1));
+  const current = phases.findIndex(ph => !phaseDone(ph));
+  const speeds = throughput(j.history);
+  const speed = speeds.length ? speeds.slice(-3).reduce((a, b) => a + b, 0) / Math.min(3, speeds.length) : 0;
+
+  const r = 34, c = 2 * Math.PI * r;
+  const ring = svgBox("job-ring", `<svg viewBox="0 0 80 80"><circle cx="40" cy="40" r="${r}" class="ring-track"/>` +
+    `<circle cx="40" cy="40" r="${r}" class="ring-fill" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - j.progress)}"/></svg>` +
+    `<b>${pct}<small>%</small></b>`, `${pct}% done`);
+
+  const stat = (value, label, cls = "") => el("div", { class: `job-stat ${cls}` }, el("b", {}, value), el("span", {}, label));
+  const stats = el("div", { class: "job-stats" },
+    stat(fmtDuration(elapsed), "Elapsed"),
+    stat(eta ? `~${fmtDuration(eta)}` : "—", "Left"),
+    stat(speed ? fmtSpeed(speed) : "—", "Speed · footage/time", "accent"),
+    stat(fmtDuration(j.progress * final.seconds), `of ${fmtDuration(final.seconds)} footage`));
+
+  const stepper = el("ol", { class: "job-phases" }, phases.map((ph, i) =>
+    el("li", { class: i < current || current < 0 ? "done" : i === current ? "current" : "", "aria-current": i === current ? "step" : null },
+      el("span", { class: "phase-dot", "aria-hidden": "true" }, i < current || current < 0 ? "✓" : i + 1), PHASES[ph])));
+
+  let spark = null;
+  if (speeds.length > 1) {
+    // the lossless join runs far faster than the overlay; cap the scale so it does not flatten the rest
+    const sorted = [...speeds].sort((a, b) => a - b), max = sorted.at(-1);
+    const top = Math.max(0.1, Math.min(max, sorted[Math.floor(sorted.length / 2)] * 1.6)), w = 300, h = 44;
+    const pts = speeds.map((v, i) => `${(i / (speeds.length - 1) * w).toFixed(1)},${(h - 2 - Math.min(v, top) / top * (h - 6)).toFixed(1)}`);
+    spark = el("div", { class: "job-spark" },
+      el("div", { class: "spark-head" }, el("span", {}, "Throughput"), el("span", {}, `peak ${fmtSpeed(max)} · now ${fmtSpeed(speeds.at(-1))}`)),
+      svgBox("spark-chart", `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">` +
+        `<polygon class="spark-area" points="0,${h} ${pts.join(" ")} ${w},${h}"/>` +
+        `<polyline class="spark-line" points="${pts.join(" ")}" vector-effect="non-scaling-stroke"/></svg>`,
+        `Speed over time, now ${fmtSpeed(speeds.at(-1))} realtime`));
+  }
+
+  const lane = t => {
+    const weights = STAGE_WEIGHTS[t.stages.length];
+    const idx = t.stages.indexOf(t.stage);
+    const state = isDone(t) ? "done" : isWorking(t) ? "running" : "pending";
+    return el("div", { class: `lane ${state}` },
+      el("span", { class: "lane-label", title: t.label }, t.label),
+      el("div", { class: "lane-bar" }, t.stages.map((st, i) => {
+        const fill = idx > i || state === "done" ? 1 : idx === i ? t.progress : 0;
+        return el("div", { class: `seg seg-${st} ${idx === i && state === "running" ? "live" : ""}`, style: `flex:${weights[i]}`, title: `${PHASES[st]} ${Math.round(fill * 100)}%` },
+          el("i", { style: `width:${fill * 100}%` }));
+      })),
+      el("span", { class: "lane-pct" }, state === "done" ? "✓" : `${Math.round(((weights.slice(0, Math.max(idx, 0)).reduce((a, b) => a + b, 0)) + (idx >= 0 ? weights[idx] * t.progress : 0)) * 100)}%`),
+      el("span", { class: "lane-speed" }, state === "running" && t.speed > 0 ? fmtSpeed(t.speed) : ""),
+      el("span", { class: "lane-stage" }, state === "running" ? PHASES[t.stage] : state === "done" ? (t.finished ? fmtDuration(t.finished - t.started) : "Done") : "Waiting"));
+  };
+  const running = pieces.filter(isWorking).length;
+  const finished = pieces.filter(isDone).length;
+
+  return el("div", { class: "job-live" },
+    el("div", { class: "job-hero" }, ring, el("div", { class: "job-hero-main" }, stepper, stats)),
+    spark,
+    el("div", { class: "lanes" },
+      el("div", { class: "lanes-head" },
+        el("span", {}, "Clips"),
+        el("span", { class: "lanes-legend" },
+          el("span", {}, el("i", { class: "dot run" }), `${running} working`),
+          el("span", {}, el("i", { class: "dot ok" }), `${finished}/${pieces.length} done`),
+          el("span", {}, `${j.parallel} at a time`))),
+      pieces.map(lane),
+      lane(final)));
+}
+
+function renderJobDone(j, elapsed) {
+  const final = j.tasks.find(t => t.id === "group");
+  return el("div", { class: "job-stats done" },
+    el("div", { class: "job-stat" }, el("b", {}, fmtDuration(elapsed)), el("span", {}, "Took")),
+    el("div", { class: "job-stat" }, el("b", {}, fmtDuration(final.seconds)), el("span", {}, "Footage")),
+    el("div", { class: "job-stat accent" }, el("b", {}, elapsed ? fmtSpeed(final.seconds / elapsed) : "—"), el("span", {}, "Average speed")));
 }
 
 let logTimer = null;

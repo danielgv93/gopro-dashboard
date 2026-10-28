@@ -35,6 +35,7 @@ class Job:
     tasks: dict[str, dict] = field(default_factory=dict)
     logs: deque = field(default_factory=lambda: deque(maxlen=5000))
     log_offset: int = 0  # number of lines dropped from the front of `logs`
+    history: deque = field(default_factory=lambda: deque(maxlen=720))  # (elapsed s, footage s done), every 5 s
     ctx: Context | None = None
 
     def __post_init__(self) -> None:
@@ -48,10 +49,13 @@ class Job:
                 "stage": "pending",
                 "progress": 0.0,
                 "weight": piece.duration or 1.0,
+                "seconds": piece.duration,
                 "stages": ["join", "overlay"] if overlay else ["join"],
             }
         self.tasks["group"] = {"label": "Final video", "stage": "pending", "progress": 0.0, "weight": 0,
-                               "stages": ["concat"]}
+                               "seconds": sum(p.duration for p in self.pieces), "stages": ["concat"]}
+        for t in self.tasks.values():
+            t.update(speed=0.0, started=None, finished=None, mark=None)
 
     def log(self, line: str) -> None:
         if len(self.logs) == self.logs.maxlen:
@@ -61,8 +65,23 @@ class Job:
     def set_progress(self, task: str, stage: str, fraction: float) -> None:
         """`task` is a piece id, or a recording key for steps shared by all the pieces of that recording (join)."""
         targets = [self.tasks[task]] if task in self.tasks else [t for t in self.tasks.values() if t.get("rec") == task]
+        now = time.time()
         for t in targets:
+            done = fraction * t["seconds"]
+            if t["stage"] != stage:  # speed is per stage: joining is a stream copy, overlay is a full encode
+                t["speed"], t["mark"] = 0.0, None
+            if t["mark"] is None:
+                t["mark"] = (now, done)
+            elif now - t["mark"][0] >= 1:
+                rate = (done - t["mark"][1]) / (now - t["mark"][0])
+                t["speed"] = rate if not t["speed"] else 0.7 * t["speed"] + 0.3 * rate
+                t["mark"] = (now, done)
+            t["started"] = t["started"] or now
+            if stage == t["stages"][-1] and fraction >= 1:
+                t["finished"] = t["finished"] or now
             t["stage"], t["progress"] = stage, fraction
+        if self.started and (not self.history or now - self.started - self.history[-1][0] >= 5):
+            self.history.append((round(now - self.started, 1), round(self.overall * self.tasks["group"]["seconds"], 1)))
 
     @property
     def overall(self) -> float:
@@ -95,7 +114,11 @@ class Job:
             "started": self.started,
             "finished": self.finished,
             "progress": self.overall,
-            "tasks": [{"id": k, **{x: v[x] for x in ("label", "stage", "progress")}} for k, v in self.tasks.items()],
+            "parallel": self.config.encoding.parallel_jobs,
+            "overlay": self.config.overlay.enabled,
+            "history": list(self.history),
+            "tasks": [{"id": k, **{x: v[x] for x in ("label", "stage", "progress", "seconds", "speed", "stages",
+                                                     "started", "finished")}} for k, v in self.tasks.items()],
         }
 
 
