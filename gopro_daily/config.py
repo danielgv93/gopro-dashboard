@@ -87,7 +87,7 @@ class OutputConfig(BaseModel):
     container: Literal["mp4", "mov"] = "mp4"
     overwrite: bool = False
     keep_intermediates: bool = False
-    # Temporary files. Empty = <output_dir>/.gopro-daily-work (same volume = fast renames, no cross-disk copies).
+    # Temporary files (exports/ and footage/ inside). Empty = ~/Library/Caches/gopro-daily-work on the internal SSD.
     work_dir: str = ""
 
 

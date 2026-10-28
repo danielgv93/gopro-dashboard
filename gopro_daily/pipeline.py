@@ -348,7 +348,7 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
         raise StepFailed("Nothing to export: no valid recordings, or every clip was removed in the editor")
     recordings = list({p.rec.key: p.rec for p in pieces}.values())
 
-    base_work = Path(config.output.work_dir).expanduser() if config.output.work_dir else dest.parent / ".gopro-daily-work"
+    base_work = work_root(config) / "exports"
     work = base_work / f"{group.key}-{datetime.now():%Y%m%d%H%M%S}"
     work.mkdir(parents=True, exist_ok=True)
     config_dir = work / "config"
@@ -447,6 +447,14 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
     finally:
         _cleanup(work, base_work, config)
     return dest
+
+
+def work_root(config: AppConfig) -> Path:
+    """Parent of all temporary files: export work in exports/, local footage copies in footage/.
+
+    Defaults to ~/Library/Caches, not the system temp dir: macOS purges files there after ~3 days unused,
+    and copied footage keeps the SD card's old timestamps, so it would vanish while still being edited."""
+    return Path(config.output.work_dir).expanduser() if config.output.work_dir else Path.home() / "Library/Caches/gopro-daily-work"
 
 
 def _cleanup(work: Path, base_work: Path, config: AppConfig) -> None:

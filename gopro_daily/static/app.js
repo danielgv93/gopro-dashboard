@@ -14,7 +14,7 @@ const SCHEMA = [
       { path: "output.container", label: "Container", type: "select", options: ["mp4", "mov"] },
       { path: "output.overwrite", label: "Overwrite existing files", type: "bool" },
       { path: "output.keep_intermediates", label: "Keep intermediate files", type: "bool" },
-      { path: "output.work_dir", label: "Temp folder", type: "folder", hint: "Empty = inside the output folder (recommended: same disk)" },
+      { path: "output.work_dir", label: "Temp folder", type: "folder", hint: "Holds export work files and footage copied to this Mac. Empty = ~/Library/Caches on the internal SSD" },
     ],
   },
   {
@@ -290,6 +290,7 @@ function openSettingsSection(sectionId, groupId, fieldPath) {
 // ---------------------------------------------------------------------------------------------- folders & essentials
 // The settings needed before a scan get a dedicated, more visual layout. Search falls back to renderField.
 const ICONS = {
+  laptop: '<svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></svg>',
   footage: '<svg viewBox="0 0 24 24"><rect x="3" y="6.5" width="13" height="11" rx="2.5"/><path d="M16 10.5l4.2-2.4c.4-.2.8.1.8.5v6.8c0 .4-.4.7-.8.5L16 13.5"/></svg>',
   film: '<svg viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="2.5"/><path d="M8 3.5v17M16 3.5v17M4 8.5h4M4 15.5h4M16 8.5h4M16 15.5h4"/></svg>',
   pencil: '<svg viewBox="0 0 24 24"><path d="M14.5 5.5l4 4M4 20l1-4.5L15.8 4.7a1.4 1.4 0 012 0l1.5 1.5a1.4 1.4 0 010 2L8.5 19 4 20z"/></svg>',
@@ -385,7 +386,98 @@ function renderSource() {
   }
 }
 
+// Copying the scanned footage to the internal SSD: exports then read fast storage instead of a slow SD card.
+let copyState = { status: "idle" };
+let copyTimer = null;
+
+async function pollCopy() {
+  clearTimeout(copyTimer);
+  const before = copyState.status;
+  try { copyState = await api("GET", "/api/copy"); } catch { return; }
+  if (before === "running" && copyState.status === "done") {
+    config = await api("GET", "/api/config");  // the server switched the source folder to the copy
+    renderSource();
+    toast("Footage copied. Now using the copy on this Mac");
+    doScan();
+  }
+  renderCopy();
+  if (copyState.status === "running") copyTimer = setTimeout(pollCopy, 1000);
+}
+
+async function startCopy() {
+  try {
+    clearTimeout(saveTimer);
+    config = await api("PUT", "/api/config", config);
+    copyState = await api("POST", "/api/copy");
+    pollCopy();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteCopy() {
+  const { size, origin, origin_exists } = copyState.local;
+  const question = origin_exists
+    ? `Delete the ${fmtSize(size)} copy on this Mac? The source goes back to ${origin}.`
+    : `The original folder${origin ? ` (${origin})` : ""} is not available: the card may be removed or formatted, so this copy may be your only one.\n\nDelete the ${fmtSize(size)} copy anyway?`;
+  if (!confirm(question)) return;
+  try {
+    config = await api("DELETE", "/api/copy");
+  } catch (e) { return toast(e.message, "error"); }
+  toast("Local copy deleted");
+  scanned = false; groups = [];
+  $("#groups").replaceChildren();
+  $("#groups-toolbar").hidden = $("#export-bar").hidden = true;
+  renderSource();
+  await pollCopy();
+  if (config.source.input_dir) doScan();
+}
+
+function renderCopy() {
+  const st = copyState;
+  const slot = $("#copy-slot");
+  if (st.status !== "running" && !st.local && (!scanned || !groups.length)) return slot.replaceChildren();
+  let body, actions;
+  if (st.local) {
+    const origin = st.local.origin ? describePath(st.local.origin) : null;
+    body = [el("strong", {}, "Using the copy on this Mac"),
+      el("span", { class: "muted small" }, `${fmtSize(st.local.size)}${origin ? ` · copied from ${origin.crumbs[0]} › ${origin.name}` : ""}. Delete it once your films are exported.`)];
+    actions = el("button", { class: "button compact ghost danger", type: "button", onclick: deleteCopy }, "Delete copy");
+  } else if (st.status === "running") {
+    const frac = st.total ? st.copied / st.total : 0;
+    const elapsed = Date.now() / 1000 - st.started;
+    const eta = frac > 0.01 ? elapsed / frac - elapsed : null;
+    body = [el("strong", {}, "Copying footage to this Mac…"),
+      el("span", { class: "muted small" }, `${fmtSize(st.copied)} of ${fmtSize(st.total)} · file ${Math.min(st.files_done + 1, st.files)} of ${st.files}${eta ? ` · ~${fmtDuration(eta)} left` : ""}`),
+      el("div", { class: "bar" }, el("div", { style: `width:${Math.round(frac * 100)}%` }))];
+    actions = el("button", { class: "button compact ghost danger", type: "button", onclick: async () => { await api("POST", "/api/copy/cancel"); pollCopy(); } }, "Cancel");
+  } else {
+    const size = groups.reduce((s, g) => s + g.size, 0);
+    const failed = st.status === "failed";
+    body = [el("strong", {}, failed ? "The copy stopped" : "Copy footage to this Mac"),
+      el("span", { class: failed ? "small copy-error" : "muted small" }, failed ? st.error
+        : `Exports read the source at its speed. Copy ~${fmtSize(size)} to the internal SSD once and export from there. Files already copied are skipped.`)];
+    actions = el("button", { class: "button compact", type: "button", onclick: startCopy },
+      failed || st.status === "cancelled" ? "Resume copy" : "Copy to Mac");
+  }
+  const finder = st.local || st.status === "running"
+    ? el("button", { class: "button compact ghost", type: "button", onclick: () => api("POST", "/api/copy/open").catch(e => toast(e.message, "error")) }, "Show in Finder")
+    : null;
+  slot.replaceChildren(el("div", { class: "copy-bar" }, icon("laptop"), el("div", { class: "copy-body" }, ...body), el("div", { class: "copy-actions" }, finder, actions)));
+}
+
+// One card at a time: the header steps are the wizard's navigation.
+function goToStep(n) {
+  document.querySelectorAll(".workspace > .card[data-step]").forEach(card => { card.hidden = card.dataset.step !== String(n); });
+  document.querySelectorAll(".steps button").forEach(b => {
+    const active = b.dataset.step === String(n);
+    b.parentElement.classList.toggle("active", active);
+    b.toggleAttribute("aria-current", active);
+    if (active) b.setAttribute("aria-current", "step");
+  });
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 function focusSource() {
+  goToStep(1);
   $("#footage-card").scrollIntoView({ behavior: "smooth", block: "start" });
   $("#source-slot .ess-change")?.focus({ preventScroll: true });
 }
@@ -592,6 +684,7 @@ function renderGroups() {
   const toolbar = $("#groups-toolbar");
 
   if (!groups.length) {
+    pollCopy();
     summary.hidden = false;
     summary.className = "empty-state";
     summary.replaceChildren(
@@ -617,6 +710,7 @@ function renderGroups() {
   $("#group-filter").value = "";
   groups.forEach((g, index) => root.append(renderDayCard(g, index)));
   updateSelection();
+  pollCopy();
 }
 
 function renderStat(value, label) {
@@ -756,7 +850,7 @@ async function processSelected() {
     await api("POST", "/api/jobs", { keys });
     toast(`${keys.length} ${keys.length === 1 ? "film" : "films"} added to the export queue`);
     pollJobs();
-    $("#jobs-card").scrollIntoView({ behavior: "smooth", block: "start" });
+    goToStep(2);
   } catch (e) {
     toast(e.message, "error");
   } finally {
@@ -816,6 +910,9 @@ function renderJobs(jobs) {
   const root = $("#jobs");
   const clear = $("#btn-clear");
   clear.disabled = !jobs.some(j => ["done", "failed", "cancelled"].includes(j.status));
+  const active = jobs.filter(j => j.status === "running" || j.status === "queued").length;
+  $("#step-jobs-count").hidden = !active;
+  $("#step-jobs-count").textContent = active;
   if (!jobs.length) {
     root.className = "empty-state compact-empty";
     root.replaceChildren(
@@ -985,8 +1082,12 @@ async function boot() {
   renderSource();
   renderPreview();
   pollJobs();
+  pollCopy();
   $("#btn-scan").onclick = doScan;
   $("#btn-process").onclick = processSelected;
+  document.querySelectorAll(".steps button").forEach(b => { b.onclick = () => goToStep(b.dataset.step); });
+  $("#btn-back").onclick = () => goToStep(1);
+  goToStep(1);
   $("#btn-clear").onclick = async () => { await api("DELETE", "/api/jobs"); pollJobs(); };
   $("#btn-doctor").onclick = openDoctor;
   $("#btn-reset").onclick = async () => {

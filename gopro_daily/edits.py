@@ -164,6 +164,18 @@ class EditStore:
             if self._edits.pop(key, None) is not None:
                 self._save()
 
+    def move_footage(self, old_root: str, new_root: str) -> None:
+        """Keeps edits after the footage is copied elsewhere: recording keys start with their folder path."""
+        def fix(key: str) -> str:
+            moved = key.startswith(old_root) and key[len(old_root):len(old_root) + 1] in ("/", "|")
+            return new_root + key[len(old_root):] if moved else key
+        with self._lock:
+            for edit in self._edits.values():
+                edit.recordings = [fix(k) for k in edit.recordings]
+                for cut in edit.cuts:
+                    cut.rec = fix(cut.rec)
+            self._save()
+
     def _save(self) -> None:
         data = {k: v.model_dump() for k, v in self._edits.items()}
         tmp = self.path.with_suffix(".tmp")

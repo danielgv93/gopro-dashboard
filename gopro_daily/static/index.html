@@ -51,12 +51,12 @@
         <p>Choose your footage, pick the films you want and export. The overlay layout is always one click away.</p>
       </div>
       <ol class="steps" aria-label="Workflow">
-        <li class="active"><span>1</span> Footage</li>
-        <li><span>2</span> Export</li>
+        <li><button type="button" data-step="1"><span>1</span> Footage</button></li>
+        <li><button type="button" data-step="2"><span>2</span> Export <em id="step-jobs-count" hidden></em></button></li>
       </ol>
     </section>
 
-    <section class="card" id="footage-card" aria-labelledby="footage-title">
+    <section class="card" id="footage-card" data-step="1" aria-labelledby="footage-title">
       <div class="card-head">
         <div class="title-group">
           <span class="step-number">1</span>
@@ -68,6 +68,7 @@
         <button id="btn-scan" class="button primary" type="button"><span aria-hidden="true">⌕</span> Scan folder</button>
       </div>
       <div id="source-slot" class="source-slot"></div>
+      <div id="copy-slot" aria-live="polite"></div>
       <div id="scan-feedback" class="inline-alert error" role="alert" hidden></div>
       <div id="scan-summary" class="empty-state" hidden></div>
       <div id="groups-toolbar" class="groups-toolbar" hidden>
@@ -92,7 +93,7 @@
       </div>
     </section>
 
-    <section class="card" id="jobs-card" aria-labelledby="jobs-title">
+    <section class="card" id="jobs-card" data-step="2" aria-labelledby="jobs-title" hidden>
       <div class="card-head">
         <div class="title-group">
           <span class="step-number">2</span>
@@ -101,7 +102,10 @@
             <p>Follow progress or reveal completed films in Finder.</p>
           </div>
         </div>
-        <button id="btn-clear" class="button quiet" type="button" disabled>Clear finished</button>
+        <div class="card-head-actions">
+          <button id="btn-back" class="button quiet" type="button">← Back to footage</button>
+          <button id="btn-clear" class="button quiet" type="button" disabled>Clear finished</button>
+        </div>
       </div>
       <div id="jobs" class="empty-state compact-empty" aria-live="polite">
         <span class="empty-icon" aria-hidden="true">↗</span>

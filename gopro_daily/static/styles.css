@@ -114,7 +114,12 @@ button.danger { color: var(--bad); }
 .welcome h1 { margin-top: 7px; font-size: clamp(28px,3vw,38px); line-height: 1.08; letter-spacing: -.035em; }
 .welcome p { max-width: 690px; margin-top: 9px; color: var(--muted); font-size: 14.5px; }
 .steps { display: flex; gap: 18px; margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
-.steps li { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.steps li { display: flex; }
+.steps button { display: flex; align-items: center; gap: 6px; white-space: nowrap; padding: 6px 10px 6px 6px; border: 0; border-radius: 99px; background: none; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+.steps button:hover { color: var(--text); background: var(--bar); }
+.steps .active button { background: var(--accent-soft); }
+.steps em { min-width: 18px; padding: 1px 6px; border-radius: 99px; background: var(--accent); color: var(--accent-text); font-style: normal; font-size: 10px; text-align: center; }
+.card-head-actions { display: flex; gap: 8px; }
 .steps span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 99px; color: var(--muted-strong); background: var(--bar); }
 .steps .active { color: var(--text); }
 .steps .active span { color: var(--accent-text); background: var(--accent); }
@@ -378,6 +383,12 @@ button.ess-crumbs:not(.button):hover { color: var(--text); background: var(--bar
 
 /* The source lives in the footage card, one step larger than a settings control. */
 .source-slot { margin-bottom: 14px; }
+.copy-bar { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 11px; align-items: center; padding: 11px; margin-bottom: 14px; border: 1px dashed var(--border); border-radius: 11px; }
+.copy-body { display: grid; gap: 2px; min-width: 0; }
+.copy-body strong { font-size: 13px; }
+.copy-body .bar { margin: 6px 0 0; }
+.copy-error { color: var(--bad); }
+.copy-actions { display: flex; gap: 6px; }
 .ess-folder.source-bar { gap: 14px; padding: 14px 14px 14px 15px; border-radius: 12px; }
 .source-bar .ess-icon { width: 42px; height: 42px; border-radius: 11px; }
 .source-bar .ess-icon svg { width: 22px; height: 22px; }

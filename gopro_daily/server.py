@@ -18,9 +18,10 @@ from pydantic import BaseModel, ValidationError
 
 from .config import AppConfig, load_config, save_config
 from .edits import OVERLAY_MIN_SECONDS, Cut, EditStore, edit_summary, make_edit, plan_pieces
+from .ingest import FootageCopy, copy_origin
 from .jobs import JobManager, reveal_in_finder
 from .layout import build_widgets
-from .pipeline import dashboard_bin, ffmpeg_bin
+from .pipeline import dashboard_bin, ffmpeg_bin, work_root
 from .scanner import Chapter, Group, scan
 
 STATIC = Path(__file__).parent / "static"
@@ -32,6 +33,7 @@ state: dict = {"config": load_config(), "groups": {}, "media": {}}
 THUMB_CACHE = Path(tempfile.gettempdir()) / "gopro-daily-thumbs"
 jobs = JobManager()
 edits = EditStore()
+footage_copy = FootageCopy()
 
 
 @app.get("/")
@@ -110,6 +112,91 @@ def do_scan() -> dict:
     # Only files found by the last scan can be previewed; the browser addresses them by opaque id, never by path.
     state["media"] = {c.media_id: c for g in groups for r in g.recordings + g.duplicates for c in r.chapters}
     return {"groups": [{**g.to_dict(), "edit": edit_summary(g, edits.get(g.key))} for g in groups]}
+
+
+# ----------------------------------------------------------------------------- local footage copy
+
+
+def _footage_root() -> Path:
+    return work_root(state["config"]) / "footage"
+
+
+def _local_copy() -> Path | None:
+    """The copy folder the current source lives in, or None when the source is not a copy on this Mac."""
+    source, root = Path(state["config"].source.input_dir).expanduser(), _footage_root()
+    if not state["config"].source.input_dir or source == root or not source.is_relative_to(root):
+        return None
+    return root / source.relative_to(root).parts[0]
+
+
+@app.get("/api/copy")
+def copy_status() -> dict:
+    status = {**footage_copy.state, "footage_root": str(_footage_root())}
+    local = _local_copy()
+    if local and local.is_dir():
+        origin = copy_origin(local)
+        status["local"] = {"path": str(local), "size": sum(f.stat().st_size for f in local.rglob("*") if f.is_file()),
+                           "origin": str(origin or ""), "origin_exists": bool(origin and origin.is_dir())}
+    return status
+
+
+@app.post("/api/copy")
+def start_copy() -> dict:
+    """Copies the scanned files next to the export work files; when done, the copy becomes the source folder."""
+    config: AppConfig = state["config"]
+    source = Path(config.source.input_dir).expanduser()
+    if not state["media"]:
+        raise HTTPException(400, "Scan the footage first")
+    if source.is_relative_to(_footage_root()):
+        raise HTTPException(400, "This footage is already on this Mac")
+
+    def done(src: Path, dest: Path) -> None:
+        current: AppConfig = state["config"]
+        if Path(current.source.input_dir).expanduser() == src:  # the user may have picked another folder meanwhile
+            current.source.input_dir = str(dest)
+            save_config(current)
+        edits.move_footage(str(src), str(dest))
+
+    try:
+        footage_copy.start(list(state["media"].values()), source, _footage_root() / (source.name or "footage"), done)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e)) from e
+    return copy_status()
+
+
+@app.delete("/api/copy")
+def delete_copy() -> dict:
+    """Deletes the local copy in use and points the source back at the folder it was copied from."""
+    if footage_copy.running:
+        raise HTTPException(400, "Wait for the copy to finish or cancel it first")
+    local = _local_copy()
+    if not local or not local.is_dir():
+        raise HTTPException(400, "The source folder is not a copy on this Mac")
+    origin = copy_origin(local)
+    shutil.rmtree(local)
+    config: AppConfig = state["config"]
+    config.source.input_dir = str(origin) if origin and origin.is_dir() else ""
+    save_config(config)
+    if origin:
+        edits.move_footage(str(local), str(origin))
+    state["groups"], state["media"] = {}, {}
+    return config.model_dump()
+
+
+@app.post("/api/copy/open")
+def open_copy() -> dict:
+    """Opens the local copy in Finder: the one in use, else the one being (or last) copied."""
+    folder = _local_copy() or (Path(footage_copy.state["dest"]) if footage_copy.state.get("dest") else None)
+    if not folder or not folder.is_dir():
+        raise HTTPException(404, "There is no copy on this Mac")
+    subprocess.Popen(["open", str(folder)])
+    return {"ok": True}
+
+
+@app.post("/api/copy/cancel")
+def cancel_copy() -> dict:
+    footage_copy.cancel()
+    return copy_status()
 
 
 # ----------------------------------------------------------------------------- film edits (footage editor)
