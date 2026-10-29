@@ -972,11 +972,17 @@ const svgBox = (cls, markup, label) => {
   return box;
 };
 
-// Footage seconds per wall-clock second between history samples (5 s apart).
-function throughput(history) {
-  const out = [];
+// Footage seconds per wall-clock second over ~30 s of history (samples are 5 s apart). The overlay reports whole
+// percents (~20 s of footage per tick), so the rate is measured between samples where the footage moved: a fixed
+// window would alternate between bursts and zeros. A stall longer than the window still drops the rate.
+function throughput(history, window = 30) {
+  const out = [], moved = [0];  // indexes of samples where the footage done changed
   for (let i = 1; i < history.length; i++) {
-    const [t0, d0] = history[i - 1], [t1, d1] = history[i];
+    if (history[i][1] !== history[i - 1][1]) moved.push(i);
+    const e = moved.at(-1);
+    const s = moved.findLast(k => history[e][0] - history[k][0] >= window) ?? 0;
+    const end = history[i][0] - history[e][0] >= window ? i : e;
+    const [t0, d0] = history[s], [t1] = history[end], d1 = history[e][1];
     if (t1 > t0) out.push(Math.max(0, (d1 - d0) / (t1 - t0)));
   }
   return out;
