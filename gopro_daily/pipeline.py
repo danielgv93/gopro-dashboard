@@ -18,9 +18,11 @@ recordings of the same day, and across the chapters of one recording.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -63,8 +65,16 @@ class Context:
         self.cancel_event.set()
         with self.lock:
             for proc in self.processes:
-                if proc.poll() is None:
-                    proc.terminate()
+                _kill_tree(proc, signal.SIGTERM)
+
+
+def _kill_tree(proc: subprocess.Popen, sig: int) -> None:
+    """Signals the whole process group: gopro-dashboard runs ffmpeg as a child that would otherwise keep rendering
+    (and keep our stdout pipe open, so `run` never returns)."""
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
 
 
 # --------------------------------------------------------------------------- binaries & encoding options
@@ -143,7 +153,8 @@ def run(
         raise Cancelled()
     ctx.log("$ " + " ".join(_quote(c) for c in cmd))
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, bufsize=0
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, bufsize=0,
+        start_new_session=True,  # own process group, so cancel reaches its children too
     )
     with ctx.lock:
         ctx.processes.add(proc)
@@ -166,8 +177,7 @@ def run(
                     tail = (tail + [line])[-15:]
         code = proc.wait()
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        _kill_tree(proc, signal.SIGKILL)  # also reaps children left behind by a finished parent
         with ctx.lock:
             ctx.processes.discard(proc)
     if ctx.cancel_event.is_set():
@@ -466,7 +476,7 @@ def _overlay_units(pieces: list[Piece], recordings: list[Recording], work: Path,
     # 2. GPS track shared by the whole group (continuous, progressive journey map) -------------------------------
     tracks: dict[str, Path] = {}
     if config.overlay.layout_mode == "generated" and config.overlay.journey_map.enabled:
-        tracks = build_tracks(recordings, work, config, ctx, parallel)
+        tracks = build_tracks(recordings, work, config, ctx)
 
     # 3. overlay per unit; its progress is summed into its piece's task, which is what the job view shows ---------
     done: dict[int, float] = {}  # unit index -> footage seconds rendered
@@ -537,22 +547,31 @@ def _cleanup(work: Path, base_work: Path, config: AppConfig) -> None:
         pass
 
 
-def build_tracks(recordings: list[Recording], work: Path, config: AppConfig, ctx: Context,
-                 parallel) -> dict[str, Path]:
+def _gps_worker_init() -> None:
+    """Pool.terminate only signals the worker: take its ffmpeg/ffprobe down with it."""
+    os.setsid()
+    signal.signal(signal.SIGTERM, lambda *_: os.killpg(0, signal.SIGKILL))
+
+
+def build_tracks(recordings: list[Recording], work: Path, config: AppConfig, ctx: Context) -> dict[str, Path]:
     """Extracts every chapter's GPS (in parallel) and writes the track file(s) the journey map widget draws from."""
     chapters = [(rec, ch) for rec in recordings if rec.has_gpmd for ch in rec.chapters]
-
-    def extract(item) -> list:
-        rec, chapter = item
-        try:
-            return extract_points(chapter.path, config)
-        except Exception as e:  # noqa: BLE001 - a broken GPS stream must not kill the whole day
-            ctx.log(f"[{rec.letter}{rec.number:04d}] could not read GPS of {chapter.path.name} for the journey map: {e}")
-            return []
-
+    ctx.step(f"Reading GPS for the journey map · 0/{len(chapters)} chapters")
     by_rec: dict[str, list] = {}
-    for (rec, _), points in zip(chapters, parallel(extract, chapters)):
-        by_rec.setdefault(rec.key, []).extend(points)
+    # Processes, not threads: parsing GPMD is pure-Python CPU work (~7 s a chapter), so threads queue on the GIL
+    # and cancel had to wait ~1 min for them. Leaving the `with` terminates the workers at once.
+    with multiprocessing.get_context("spawn").Pool(config.encoding.parallel_jobs, initializer=_gps_worker_init) as pool:
+        pending = [pool.apply_async(extract_points, (ch.path, config)) for _, ch in chapters]
+        for i, ((rec, chapter), result) in enumerate(zip(chapters, pending), 1):
+            while not result.ready():
+                if ctx.cancel_event.is_set():
+                    raise Cancelled()
+                result.wait(0.25)
+            try:
+                by_rec.setdefault(rec.key, []).extend(result.get())
+            except Exception as e:  # noqa: BLE001 - a broken GPS stream must not kill the whole day
+                ctx.log(f"[{rec.letter}{rec.number:04d}] could not read GPS of {chapter.path.name} for the journey map: {e}")
+            ctx.step(f"Reading GPS for the journey map · {i}/{len(chapters)} chapters")
     segments = [by_rec.get(rec.key, []) for rec in recordings]
     for rec, points in zip(recordings, segments):
         if rec.has_gpmd:

@@ -107,6 +107,7 @@ class Job:
             "output": self.output,
             "error": self.error,
             "activity": self.activity,
+            "cancelling": self.status == "running" and bool(self.ctx and self.ctx.cancel_event.is_set()),
             "created": self.created,
             "started": self.started,
             "finished": self.finished,
@@ -139,7 +140,9 @@ class JobManager:
             job.status = "cancelled"
             job.finished = time.time()
         elif job.status == "running" and job.ctx:
-            job.log("Cancelling…")
+            if not job.ctx.cancel_event.is_set():
+                job.log("Cancelling…")
+            job.activity = "Stopping…"
             job.ctx.cancel()
 
     def clear_finished(self) -> None:

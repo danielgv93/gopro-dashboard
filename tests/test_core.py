@@ -275,3 +275,43 @@ def test_overlay_profile_ends_with_the_video(tmp_path: Path):
     write_ffmpeg_profile(AppConfig(), tmp_path)
     profile = json.loads((tmp_path / "ffmpeg-profiles.json").read_text())[PROFILE_NAME]
     assert profile["filter"] == "[1:v]tpad=stop=-1:stop_mode=clone[ov];[0:v][ov]overlay=shortest=1"
+
+
+def test_cancel_stops_a_step_whose_child_keeps_running():
+    import subprocess
+    import sys
+    import time
+
+    from gopro_daily.pipeline import Cancelled, run
+
+    ctx = Context(log=lambda _: None, progress=lambda *_: None, cancel_event=threading.Event(),
+                  processes=set(), lock=threading.Lock())
+    # like gopro-dashboard -> ffmpeg: the child inherits stdout and outlives a terminated parent
+    cmd = [sys.executable, "-c", "import subprocess, time; subprocess.Popen(['sleep', '30']); time.sleep(30)"]
+    threading.Timer(0.5, ctx.cancel).start()
+    started = time.time()
+    with pytest.raises(Cancelled):
+        run(cmd, ctx)
+    assert time.time() - started < 5
+    assert subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True).returncode == 1  # no orphan left
+
+
+
+def test_cancel_stops_the_gps_read_at_once(tmp_path: Path):
+    import subprocess
+    import time
+
+    from gopro_daily.pipeline import Cancelled, build_tracks
+
+    os.mkfifo(tmp_path / "GH010001.MP4")  # nothing ever writes it, so reading its GPS blocks like a slow chapter
+    r = rec(1, "2026-07-01T08:00:00")
+    r.chapters, r.has_gpmd = [Chapter(path=tmp_path / "GH010001.MP4", chapter=1, size=100, duration=30)], True
+    ctx = Context(log=lambda _: None, progress=lambda *_: None, cancel_event=threading.Event(),
+                  processes=set(), lock=threading.Lock())
+    threading.Timer(0.5, ctx.cancel).start()
+    started = time.time()
+    with pytest.raises(Cancelled):
+        build_tracks([r], tmp_path, AppConfig(), ctx)
+    assert time.time() - started < 3
+    time.sleep(0.2)
+    assert subprocess.run(["pgrep", "-f", str(tmp_path)], capture_output=True).returncode == 1  # no ffprobe left
