@@ -66,7 +66,9 @@ def test_everything_removed_plans_nothing():
 def test_job_tasks_follow_pieces_and_join_progress_reaches_every_piece_of_a_recording():
     group = film(rec(1, "2026-07-01T08:00:00"))
     edit = make_edit(group, [Cut(rec=A, start=0, end=10), Cut(rec=A, start=30, end=40)])
-    job = Job(group=group, config=AppConfig(), pieces=plan_pieces(group, edit))
+    config = AppConfig()
+    config.overlay.enabled = False  # join only runs without overlay
+    job = Job(group=group, config=config, pieces=plan_pieces(group, edit))
     assert [t["label"] for k, t in job.tasks.items() if k != "group"] == ["X0001 · 0:00–0:10", "X0001 · 0:30–0:40"]
     job.set_progress(A, "join", 0.5)
     assert all(t["progress"] == 0.5 for k, t in job.tasks.items() if k != "group")
@@ -75,8 +77,9 @@ def test_job_tasks_follow_pieces_and_join_progress_reaches_every_piece_of_a_reco
 
 def test_job_progress_is_zero_before_any_task_starts():
     group = film(rec(1, "2026-07-01T08:00:00"))
-    job = Job(group=group, config=AppConfig(), pieces=plan_pieces(group, None))  # overlay on: two stages
+    job = Job(group=group, config=AppConfig(), pieces=plan_pieces(group, None))  # overlay on: no join stage
     assert job.overall == 0
+    assert {t["stages"][0] for t in job.tasks.values()} == {"overlay", "concat"}
 
 
 def test_store_round_trip(tmp_path: Path):

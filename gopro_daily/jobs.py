@@ -50,7 +50,7 @@ class Job:
                 "progress": 0.0,
                 "weight": piece.duration or 1.0,
                 "seconds": piece.duration,
-                "stages": ["join", "overlay"] if overlay else ["join"],
+                "stages": ["overlay"] if overlay else ["join"],  # overlay renders straight from the chapters, no join
             }
         self.tasks["group"] = {"label": "Final video", "stage": "pending", "progress": 0.0, "weight": 0,
                                "seconds": sum(p.duration for p in self.pieces), "stages": ["concat"]}
@@ -91,12 +91,7 @@ class Job:
         total = sum(t["weight"] for t in recs) or 1
         done = 0.0
         for t in recs:
-            stages = t["stages"]
-            idx = stages.index(t["stage"]) if t["stage"] in stages else (-1 if t["stage"] == "pending" else 0)
-            # join is cheap next to overlay rendering, weight stages accordingly
-            weights = [0.08, 0.92] if len(stages) == 2 else [1.0]
-            frac = sum(weights[:idx]) + weights[idx] * t["progress"] if idx >= 0 else 0.0  # [:-1] is not empty
-            done += frac * t["weight"]
+            done += (t["progress"] if t["stage"] in t["stages"] else 0.0) * t["weight"]
         rec_part = done / total
         concat = self.tasks["group"]["progress"] if self.tasks["group"]["stage"] == "concat" else 0
         return min(1.0, rec_part * 0.95 + concat * 0.05)

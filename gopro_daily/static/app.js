@@ -944,7 +944,6 @@ function renderJobs(jobs) {
 }
 
 const PHASES = { join: "Join chapters", overlay: "Draw overlay", concat: "Final video" };
-const STAGE_WEIGHTS = { 1: [1], 2: [0.08, 0.92] };  // same split as Job.overall in jobs.py
 const fmtSpeed = x => x >= 10 ? `${Math.round(x)}×` : `${x.toFixed(1)}×`;
 const svgBox = (cls, markup, label) => {
   const box = el("div", { class: cls, role: "img", "aria-label": label });
@@ -966,10 +965,10 @@ function renderJobLive(j, elapsed, eta) {
   const pct = Math.round(j.progress * 100);
   const pieces = j.tasks.filter(t => t.id !== "group");
   const final = j.tasks.find(t => t.id === "group");
-  const phases = [...(j.overlay ? ["join", "overlay"] : ["join"]), "concat"];
+  const phases = [j.overlay ? "overlay" : "join", "concat"];  // overlay renders straight from the chapters
   // clips that fall back to no overlay never report it, so the final concat closes every earlier phase
   const isDone = t => t.finished || (t.id !== "group" && final.stage === "concat");
-  const isWorking = t => !isDone(t) && t.stage !== "pending" && t.progress < 1;  // join done = waiting for overlay
+  const isWorking = t => !isDone(t) && t.stage !== "pending" && t.progress < 1;  // stage done = waiting for the final concat
   const phaseDone = ph => ph === "concat" ? final.finished : final.stage === "concat" ||
     pieces.every(t => t.stages.indexOf(t.stage) > t.stages.indexOf(ph) || (t.stage === ph && t.progress >= 1));
   const current = phases.findIndex(ph => !phaseDone(ph));
@@ -1007,17 +1006,16 @@ function renderJobLive(j, elapsed, eta) {
   }
 
   const lane = t => {
-    const weights = STAGE_WEIGHTS[t.stages.length];
     const idx = t.stages.indexOf(t.stage);
     const state = isDone(t) ? "done" : isWorking(t) ? "running" : "pending";
     return el("div", { class: `lane ${state}` },
       el("span", { class: "lane-label", title: t.label }, t.label),
       el("div", { class: "lane-bar" }, t.stages.map((st, i) => {
         const fill = idx > i || state === "done" ? 1 : idx === i ? t.progress : 0;
-        return el("div", { class: `seg seg-${st} ${idx === i && state === "running" ? "live" : ""}`, style: `flex:${weights[i]}`, title: `${PHASES[st]} ${Math.round(fill * 100)}%` },
+        return el("div", { class: `seg seg-${st} ${idx === i && state === "running" ? "live" : ""}`, title: `${PHASES[st]} ${Math.round(fill * 100)}%` },
           el("i", { style: `width:${fill * 100}%` }));
       })),
-      el("span", { class: "lane-pct" }, state === "done" ? "✓" : `${Math.round(((weights.slice(0, Math.max(idx, 0)).reduce((a, b) => a + b, 0)) + (idx >= 0 ? weights[idx] * t.progress : 0)) * 100)}%`),
+      el("span", { class: "lane-pct" }, state === "done" ? "✓" : `${idx >= 0 ? Math.round(t.progress * 100) : 0}%`),
       el("span", { class: "lane-speed" }, state === "running" && t.speed > 0 ? fmtSpeed(t.speed) : ""),
       el("span", { class: "lane-stage" }, state === "running" ? PHASES[t.stage] : state === "done" ? (t.finished ? fmtDuration(t.finished - t.started) : "Done") : "Waiting"));
   };

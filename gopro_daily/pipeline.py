@@ -454,8 +454,6 @@ def _overlay_units(pieces: list[Piece], recordings: list[Recording], work: Path,
     for rec in recordings:
         ctx.log(f"[{rec.letter}{rec.number:04d}] {len(rec.chapters)} chapter(s), {rec.duration / 60:.1f} min")
     sources = parallel(prepare, list(enumerate(units)))
-    for piece in pieces:
-        ctx.progress(piece.id, "join", 1.0)
 
     # 2. GPS track shared by the whole group (continuous, progressive journey map) -------------------------------
     tracks: dict[str, Path] = {}
