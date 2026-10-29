@@ -96,3 +96,21 @@ def test_copy_plan_puts_videos_first_and_proxies_last():
                 for n in (2, 1)]
     names = [src.name for src, _ in copy_plan(chapters, sd, Path("/dest"))]
     assert names == ["GX010030.MP4", "GX010030.THM", "GX020030.MP4", "GX020030.THM", "GL010030.LRV", "GL020030.LRV"]
+
+
+def test_clear_cache_deletes_export_work_files_but_keeps_footage(tmp_path: Path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from gopro_daily import server
+
+    config = AppConfig()
+    config.output.work_dir = str(tmp_path / "work")
+    (tmp_path / "work" / "exports" / "day-1").mkdir(parents=True)
+    (tmp_path / "work" / "exports" / "day-1" / "piece.mp4").write_bytes(b"x" * 50)
+    (tmp_path / "work" / "footage").mkdir()
+    monkeypatch.setitem(server.state, "config", config)
+    client = TestClient(server.app)
+
+    assert client.get("/api/cache").json()["size"] == 50
+    assert client.delete("/api/cache").json()["size"] == 0
+    assert not (tmp_path / "work" / "exports").exists() and (tmp_path / "work" / "footage").is_dir()

@@ -906,11 +906,32 @@ async function pollJobs() {
   pollTimer = setTimeout(pollJobs, active ? 1000 : 5000);
 }
 
+// Leftover export work files; sized only when the number of active jobs changes, not on every poll.
+let cacheActive = null;
+async function refreshCache(active) {
+  cacheActive = active;
+  const button = $("#btn-cache");
+  if (active) return void (button.hidden = true);
+  try {
+    const { size } = await api("GET", "/api/cache");
+    button.hidden = !size;
+    button.textContent = `Clear cache · ${fmtSize(size)}`;
+    button.dataset.size = fmtSize(size);
+  } catch { button.hidden = true; }
+}
+
+async function clearCache() {
+  if (!confirm(`Delete ${$("#btn-cache").dataset.size} of leftover export work files? Exported films and footage copied to this Mac are kept.`)) return;
+  try { await api("DELETE", "/api/cache"); toast("Cache cleared"); } catch (e) { toast(e.message, "error"); }
+  refreshCache(cacheActive);
+}
+
 function renderJobs(jobs) {
   const root = $("#jobs");
   const clear = $("#btn-clear");
   clear.disabled = !jobs.some(j => ["done", "failed", "cancelled"].includes(j.status));
   const active = jobs.filter(j => j.status === "running" || j.status === "queued").length;
+  if (active !== cacheActive) refreshCache(active);
   $("#step-jobs-count").hidden = !active;
   $("#step-jobs-count").textContent = active;
   if (!jobs.length) {
@@ -1088,6 +1109,7 @@ async function boot() {
   $("#btn-back").onclick = () => goToStep(1);
   goToStep(1);
   $("#btn-clear").onclick = async () => { await api("DELETE", "/api/jobs"); pollJobs(); };
+  $("#btn-cache").onclick = clearCache;
   $("#btn-doctor").onclick = openDoctor;
   $("#btn-reset").onclick = async () => {
     if (!confirm("Reset all settings to defaults (folders are kept)?")) return;

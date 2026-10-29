@@ -202,6 +202,25 @@ def open_copy() -> dict:
     return {"ok": True}
 
 
+def _exports_cache() -> Path:
+    return work_root(state["config"]) / "exports"
+
+
+@app.get("/api/cache")
+def cache_status() -> dict:
+    folder = _exports_cache()
+    return {"path": str(folder), "size": sum(f.stat().st_size for f in folder.rglob("*") if f.is_file()) if folder.is_dir() else 0}
+
+
+@app.delete("/api/cache")
+def clear_cache() -> dict:
+    """Deletes leftover export work files (cancelled, failed or kept runs). Footage copies are left alone."""
+    if any(j.status in ("queued", "running") for j in jobs.jobs.values()):
+        raise HTTPException(400, "Wait for the exports to finish or cancel them first")
+    shutil.rmtree(_exports_cache(), ignore_errors=True)
+    return cache_status()
+
+
 @app.post("/api/copy/cancel")
 def cancel_copy() -> dict:
     footage_copy.cancel()
