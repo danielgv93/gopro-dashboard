@@ -261,6 +261,8 @@ button.danger { color: var(--bad); }
 .job-phases .current { color: var(--text); }
 .job-phases .current .phase-dot { background: var(--accent); color: var(--accent-text); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 8%, transparent); } }
+.job-activity { margin: 0; display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--muted-strong); min-width: 0; }
+.job-activity span { flex: none; color: var(--accent); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
 .job-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .job-stats.done { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 12px; }
 .job-stat { padding: 8px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); min-width: 0; }

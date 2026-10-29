@@ -29,6 +29,7 @@ class Job:
     status: str = "queued"  # queued | running | done | failed | cancelled
     output: str = ""
     error: str = ""
+    activity: str = ""  # current step, set by the pipeline through Context.step
     created: float = field(default_factory=time.time)
     started: float | None = None
     finished: float | None = None
@@ -105,6 +106,7 @@ class Job:
             "status": self.status,
             "output": self.output,
             "error": self.error,
+            "activity": self.activity,
             "created": self.created,
             "started": self.started,
             "finished": self.finished,
@@ -153,7 +155,7 @@ class JobManager:
             self.current = job
             job.status, job.started = "running", time.time()
             job.ctx = Context(log=job.log, progress=job.set_progress, cancel_event=threading.Event(),
-                              processes=set(), lock=threading.Lock())
+                              processes=set(), lock=threading.Lock(), step=lambda text: job.ctx.cancel_event.is_set() or setattr(job, "activity", text))
             try:
                 job.output = str(process_group(job.group, job.config, job.ctx, job.pieces))
                 job.status = "done"

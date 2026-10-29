@@ -1023,7 +1023,8 @@ function renderJobLive(j, elapsed, eta) {
   const finished = pieces.filter(isDone).length;
 
   return el("div", { class: "job-live" },
-    el("div", { class: "job-hero" }, ring, el("div", { class: "job-hero-main" }, stepper, stats)),
+    el("div", { class: "job-hero" }, ring, el("div", { class: "job-hero-main" }, stepper,
+      j.activity ? el("p", { class: "job-activity", "aria-live": "polite" }, el("span", {}, "Now"), j.activity) : null, stats)),
     spark,
     el("div", { class: "lanes" },
       el("div", { class: "lanes-head" },

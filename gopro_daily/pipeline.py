@@ -57,6 +57,7 @@ class Context:
     cancel_event: threading.Event
     processes: set[subprocess.Popen]
     lock: threading.Lock
+    step: Callable[[str], None] = lambda _: None  # what the job is doing right now, shown in the export queue
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -405,6 +406,7 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
                 ctx.log(f"[{name_of(rec)}] {len(rec.chapters)} chapter(s), {rec.duration / 60:.1f} min")
                 return join_chapters(rec, work / f"{name_of(rec)}_joined.mp4", config, ctx, rec.key)
 
+            ctx.step(f"Joining the chapters of {len(recordings)} recording(s)")
             joined = dict(zip([r.key for r in recordings], parallel(join, recordings)))
 
             # 2. cut the kept ranges out of the joined recordings (lossless) -----------------------------------
@@ -417,13 +419,17 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
                 ctx.progress(piece.id, "join", 1.0)
                 return src
 
+            if not all(p.full for p in pieces):
+                ctx.step("Cutting the kept ranges")
             products = parallel(cut, list(enumerate(pieces)))
 
+        ctx.step(f"Joining {len(products)} part(s) into the final video")
         ctx.log(f"Concatenating {len(products)} part(s) -> {dest}")
         concat_products(products, dest, config, ctx, sum(p.duration for p in pieces), keep_telemetry=not overlay_on)
         ctx.progress("group", "concat", 1.0)
         _copy_times(recordings[0].chapters[0].path, dest)
     finally:
+        ctx.step("Cleaning up temporary files")
         _cleanup(work, base_work, config)
     return dest
 
@@ -453,6 +459,8 @@ def _overlay_units(pieces: list[Piece], recordings: list[Recording], work: Path,
 
     for rec in recordings:
         ctx.log(f"[{rec.letter}{rec.number:04d}] {len(rec.chapters)} chapter(s), {rec.duration / 60:.1f} min")
+    if not all(u.full for u in units):
+        ctx.step("Cutting the kept ranges")
     sources = parallel(prepare, list(enumerate(units)))
 
     # 2. GPS track shared by the whole group (continuous, progressive journey map) -------------------------------
@@ -507,6 +515,7 @@ def _overlay_units(pieces: list[Piece], recordings: list[Recording], work: Path,
         report(i, unit, 1.0)
         return rendered
 
+    ctx.step(f"Drawing the overlay on {len(units)} chapter clip(s), {config.encoding.parallel_jobs} at a time")
     return parallel(overlay, [(i, u, src) for (i, u), src in zip(enumerate(units), sources)])
 
 
