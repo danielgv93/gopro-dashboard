@@ -21,7 +21,7 @@ and are joined once at the end.
 
 ## 1. Why: what the measurements say
 
-The numbers come from `scripts/bench_pipeline.py` and `scripts/bench_resolution.py` on an M5 Pro, with logs in `logs/bench-*`.
+The numbers were measured on an M5 Pro with benchmark scripts that have since been removed (`git show 28c1d08:scripts/bench_pipeline.py` recovers them).
 
 | Fact | Measured | Consequence |
 |---|---|---|
@@ -119,7 +119,6 @@ Three rules:
 | `gopro_daily/jobs.py` | Unit progress is aggregated into its piece's task (see 2.4) |
 | `tests/test_edits.py` | `plan_units` cases from the table in 2.1 |
 | `tests/test_core.py` | New: `process_group` with `pipeline.run` stubbed, checking one render per chapter and concat in film order. Existing `GOPRO_SAMPLE` end-to-end tests: add a 2-chapter recording |
-| `scripts/bench_pipeline.py` | Measure a 2-chapter recording end-to-end; add the AVFoundation check |
 
 No config, API or UI change: the job view still shows one row per piece.
 
