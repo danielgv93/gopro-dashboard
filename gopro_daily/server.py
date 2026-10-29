@@ -29,6 +29,15 @@ STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="GoPro Daily")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+
+@app.middleware("http")
+async def revalidate_ui(request, call_next):
+    # without it the browser keeps running an old app.js after an update (heuristic caching on Last-Modified)
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 state: dict = {"config": load_config(), "groups": {}, "media": {}}
 THUMB_CACHE = Path(tempfile.gettempdir()) / "gopro-daily-thumbs"
 jobs = JobManager()
