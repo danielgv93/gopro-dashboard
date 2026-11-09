@@ -366,6 +366,9 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
     if dest.exists() and not config.output.overwrite:
         raise StepFailed(f"{dest} already exists (enable 'overwrite' to replace it)")
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # Fail before hours of rendering, e.g. an NTFS drive that macOS mounts read-only.
+    if not os.access(dest.parent, os.W_OK):
+        raise StepFailed(f"Cannot write to {dest.parent} (read-only drive? macOS mounts NTFS read-only)")
 
     for r in group.recordings:
         if r.error:
