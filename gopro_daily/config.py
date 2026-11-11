@@ -196,6 +196,8 @@ class EncodingConfig(BaseModel):
     rate_control: Literal["quality", "bitrate"] = "quality"
     quality: int = Field(65, ge=1, le=100, description="VideoToolbox -q:v (1-100) or x264/x265 CRF mapping")
     bitrate: str = "60M"
+    # Frame size when re-encoding. At 4K the single hardware encoder is the limit; 1440p frees it (never scales up).
+    resolution: Literal["source", "1440p"] = "source"
     hw_decode: bool = True
     audio: Literal["copy", "aac"] = "copy"
     # Overlay rendering is single-threaded Python per recording: running several recordings in parallel uses the cores.

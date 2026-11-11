@@ -277,6 +277,80 @@ def test_overlay_profile_ends_with_the_video(tmp_path: Path):
     assert profile["filter"] == "[1:v]tpad=stop=-1:stop_mode=clone[ov];[0:v][ov]overlay=shortest=1"
 
 
+def test_1440p_scales_the_video_before_the_overlay(tmp_path: Path):
+    import json
+
+    from gopro_daily.pipeline import (PROFILE_NAME, input_args, output_size, profile_name, scale_filter,
+                                      write_ffmpeg_profile)
+
+    config = AppConfig()
+    config.encoding.resolution = "1440p"
+    uhd, hd, tall = rec(1, None), rec(2, None, width=1920, height=1080), rec(3, None, width=2160, height=3840)
+    assert output_size(uhd, config) == (2560, 1440)
+    assert output_size(hd, config) is None  # never scales up
+    assert output_size(tall, config) == (1440, 2560)
+    assert output_size(uhd, AppConfig()) is None
+    custom = config.model_copy(deep=True)
+    custom.overlay.layout_mode = "xml"
+    assert output_size(uhd, custom) is None  # a hand-written layout is tied to the frame size it was made for
+
+    write_ffmpeg_profile(config, tmp_path, [uhd, hd])
+    profiles = json.loads((tmp_path / "ffmpeg-profiles.json").read_text())
+    assert set(profiles) == {PROFILE_NAME, profile_name(uhd, config)} and profile_name(hd, config) == PROFILE_NAME
+    scaled = profiles[profile_name(uhd, config)]
+    assert scaled["input"] == ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"]
+    assert scaled["filter"] == ("[0:v]scale_vt=w=2560:h=1440,hwdownload,format=nv12[v];"
+                                "[1:v]tpad=stop=-1:stop_mode=clone[ov];[v][ov]overlay=shortest=1")
+
+    deep = rec(4, None)
+    deep.pix_fmt = "yuv420p10le"
+    assert scale_filter(deep, (2560, 1440), config).endswith("format=p010le")
+    config.encoding.hw_decode = False
+    assert scale_filter(uhd, (2560, 1440), config) == "scale=2560:1440" and input_args(config, scaled=True) == []
+
+
+def test_estimate_of_size_and_time():
+    from gopro_daily.edits import Piece
+    from gopro_daily.pipeline import ENCODE_SPEED, estimate
+
+    r = rec(1, None)
+    r.duration, r.chapters[0].size = 3600, 20_000_000_000
+    pieces = [Piece(r, 0, 1800)]
+    config = AppConfig()
+    assert estimate(pieces, config) == (None, 1800 / ENCODE_SPEED["source"])  # constant quality: size unknown
+
+    config.encoding.rate_control, config.encoding.bitrate = "bitrate", "15M"
+    assert estimate(pieces, config)[0] == round(1800 * (15e6 + 192e3) / 8)
+    config.encoding.resolution = "1440p"
+    assert estimate(pieces, config)[1] == 1800 / ENCODE_SPEED["1440p"]
+
+    config.overlay.enabled = False  # lossless join: the kept half of the source
+    assert estimate(pieces, config)[0] == 10_000_000_000
+
+
+def test_preflight_stops_a_read_only_or_full_destination(tmp_path: Path, monkeypatch):
+    from collections import namedtuple
+
+    from gopro_daily import pipeline
+
+    config = AppConfig()
+    config.output.output_dir, config.output.work_dir = str(tmp_path / "not-created-yet"), str(tmp_path / "work")
+    free = lambda n: monkeypatch.setattr(pipeline.shutil, "disk_usage", lambda _: namedtuple("U", "free")(n))  # noqa: E731
+
+    free(100e9)
+    pipeline.preflight(config, 40e9, 40e9)  # same drive: parts + film = 80 GB
+    with pytest.raises(pipeline.StepFailed, match="Not enough space"):
+        pipeline.preflight(config, 60e9, 60e9)
+    (tmp_path / "work").mkdir()  # destination and work folder on different drives: each holds the film once
+    stat = os.stat
+    monkeypatch.setattr(pipeline.os, "stat", lambda p, **k: namedtuple("S", "st_dev st_mode")(str(p), stat(p, **k).st_mode))
+    pipeline.preflight(config, 60e9, 60e9)
+    monkeypatch.undo()
+    monkeypatch.setattr(pipeline.os, "access", lambda *_: False)
+    with pytest.raises(pipeline.StepFailed, match="Cannot write"):
+        pipeline.preflight(config, 0, 0)
+
+
 def test_cancel_stops_a_step_whose_child_keeps_running():
     import subprocess
     import sys

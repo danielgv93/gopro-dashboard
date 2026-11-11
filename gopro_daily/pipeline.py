@@ -94,8 +94,32 @@ def dashboard_cmd() -> list[str]:
     return [sys.executable, "-m", "gopro_daily.dashboard"]
 
 
-def input_args(config: AppConfig) -> list[str]:
-    return ["-hwaccel", "videotoolbox"] if config.encoding.hw_decode else []
+def input_args(config: AppConfig, scaled: bool = False) -> list[str]:
+    if not config.encoding.hw_decode:
+        return []
+    # scale_vt works on the GPU, so the decoded frames have to stay there
+    return ["-hwaccel", "videotoolbox", *(["-hwaccel_output_format", "videotoolbox_vld"] if scaled else [])]
+
+
+def output_size(rec: Recording, config: AppConfig) -> tuple[int, int] | None:
+    """Frame size `rec` is scaled down to when re-encoding, or None to keep its own (never scales up)."""
+    short = min(rec.width, rec.height)
+    # Only the generated layout can be rebuilt for the smaller frame: a custom or bundled one is tied to its size.
+    if config.encoding.resolution != "1440p" or short <= 1440 or config.overlay.layout_mode != "generated":
+        return None
+    even = lambda v: round(v * 1440 / short / 2) * 2  # noqa: E731
+    return even(rec.width), even(rec.height)
+
+
+def scale_filter(rec: Recording, size: tuple[int, int], config: AppConfig) -> str:
+    if not config.encoding.hw_decode:
+        return f"scale={size[0]}:{size[1]}"
+    return f"scale_vt=w={size[0]}:h={size[1]},hwdownload,format={'p010le' if '10' in rec.pix_fmt else 'nv12'}"
+
+
+def profile_name(rec: Recording, config: AppConfig) -> str:
+    size = output_size(rec, config)
+    return f"{PROFILE_NAME}-{size[0]}x{size[1]}-{rec.pix_fmt}" if size else PROFILE_NAME
 
 
 def video_encode_args(config: AppConfig) -> list[str]:
@@ -122,19 +146,23 @@ def audio_encode_args(config: AppConfig) -> list[str]:
     return ["-c:a", "copy"] if config.encoding.audio == "copy" else ["-c:a", "aac", "-b:a", "192k"]
 
 
-def write_ffmpeg_profile(config: AppConfig, config_dir: Path) -> None:
-    """gopro-dashboard reads encoder settings from <config-dir>/ffmpeg-profiles.json."""
+def write_ffmpeg_profile(config: AppConfig, config_dir: Path, recordings: list[Recording] = ()) -> None:
+    """gopro-dashboard reads encoder settings from <config-dir>/ffmpeg-profiles.json.
+    Recordings that are scaled down get their own profile (see `profile_name`): the video shrinks before the overlay."""
     config_dir.mkdir(parents=True, exist_ok=True)
-    profile = {
-        PROFILE_NAME: {
-            "input": input_args(config),
-            # The 10 fps overlay stream usually ends after the video, and plain `overlay` then repeats the last video
-            # frame (+1 frame and an audio gap at every unit join). Padding it forever + shortest=1 ends at the video.
-            "filter": "[1:v]tpad=stop=-1:stop_mode=clone[ov];[0:v][ov]overlay=shortest=1",
-            "output": [*video_encode_args(config), *audio_encode_args(config)],
-        }
-    }
-    (config_dir / "ffmpeg-profiles.json").write_text(json.dumps(profile, indent=2))
+    # The 10 fps overlay stream usually ends after the video, and plain `overlay` then repeats the last video
+    # frame (+1 frame and an audio gap at every unit join). Padding it forever + shortest=1 ends at the video.
+    overlay = "[1:v]tpad=stop=-1:stop_mode=clone[ov];[{video}][ov]overlay=shortest=1"
+    output = [*video_encode_args(config), *audio_encode_args(config)]
+    profiles = {PROFILE_NAME: {"input": input_args(config), "filter": overlay.format(video="0:v"), "output": output}}
+    for rec in recordings:
+        if size := output_size(rec, config):
+            profiles[profile_name(rec, config)] = {
+                "input": input_args(config, scaled=True),
+                "filter": f"[0:v]{scale_filter(rec, size, config)}[v];" + overlay.format(video="v"),
+                "output": output,
+            }
+    (config_dir / "ffmpeg-profiles.json").write_text(json.dumps(profiles, indent=2))
 
 
 # --------------------------------------------------------------------------- process runner
@@ -247,7 +275,7 @@ def render_overlay(src: Path, rec: Recording, dest: Path, layout_xml: Path, conf
         *dashboard_cmd(),
         "--config-dir", str(config_dir),
         "--cache-dir", str(CACHE_DIR),
-        "--profile", PROFILE_NAME,
+        "--profile", profile_name(rec, config),
         "--font", ov.font,
         "--units-speed", ov.units_speed,
         "--map-style", ov.map_style,
@@ -258,6 +286,8 @@ def render_overlay(src: Path, rec: Recording, dest: Path, layout_xml: Path, conf
         cmd += ["--ffmpeg-dir", ffdir]
     if ov.map_api_key:
         cmd += ["--map-api-key", ov.map_api_key]
+    if size := output_size(rec, config):
+        cmd += ["--overlay-size", f"{size[0]}x{size[1]}"]
     if ov.layout_mode == "builtin":
         cmd += ["--layout", "default"]
     else:
@@ -277,12 +307,15 @@ def render_overlay(src: Path, rec: Recording, dest: Path, layout_xml: Path, conf
     return dest
 
 
-def encode_plain(src: Path, dest: Path, config: AppConfig, ctx: Context, task: str, duration: float) -> Path:
-    """Re-encodes without overlay, with the overlay's encoder. A unit that falls back must not be a copy of the camera's
-    stream: a file that mixes it with VideoToolbox output does not play in Apple apps."""
-    run([ffmpeg_bin(config), "-hide_banner", "-y", "-nostats", "-progress", "pipe:1", *input_args(config),
-         "-i", str(src), "-map", "0:v:0", "-map", "0:a?", *video_encode_args(config), *audio_encode_args(config),
-         str(dest)], ctx, ffmpeg_progress(ctx, task, "overlay", duration))
+def encode_plain(src: Path, rec: Recording, dest: Path, config: AppConfig, ctx: Context, task: str,
+                 duration: float) -> Path:
+    """Re-encodes without overlay, with the overlay's encoder and frame size. A unit that falls back must not be a
+    copy of the camera's stream: a file that mixes it with VideoToolbox output does not play in Apple apps."""
+    size = output_size(rec, config)
+    scale = ["-vf", scale_filter(rec, size, config)] if size else []
+    run([ffmpeg_bin(config), "-hide_banner", "-y", "-nostats", "-progress", "pipe:1", *input_args(config, bool(size)),
+         "-i", str(src), "-map", "0:v:0", "-map", "0:a?", *scale, *video_encode_args(config),
+         *audio_encode_args(config), str(dest)], ctx, ffmpeg_progress(ctx, task, "overlay", duration))
     return dest
 
 
@@ -360,15 +393,63 @@ def output_path(group: Group, config: AppConfig) -> Path:
     return Path(config.output.output_dir).expanduser() / f"{name}.{config.output.container}"
 
 
+# Rough export speeds, measured on an M5 Pro: 4 overlay units at a time from 4K footage, 2026-11-11.
+# shortcut: one machine's numbers, learn them from finished jobs if this ever runs on other hardware.
+ENCODE_SPEED = {"source": 3.9, "1440p": 7.8}  # footage seconds per second, hardware encoders
+COPY_BYTES_PER_SECOND = 80e6  # a lossless join moves the footage at the SD card's read speed
+AUDIO_BITS_PER_SECOND = 192_000
+
+
+def _bits_per_second(bitrate: str) -> float | None:
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kKmM]?)", bitrate.strip())
+    return float(m[1]) * {"": 1, "k": 1e3, "m": 1e6}[m[2].lower()] if m else None
+
+
+def estimate(pieces: list[Piece], config: AppConfig) -> tuple[int | None, float | None]:
+    """(output bytes, export seconds) for a film of these pieces. None where it cannot be known before rendering:
+    the size of a constant-quality encode depends on the footage, and software encoders were never timed."""
+    duration = sum(p.duration for p in pieces)
+    if not config.overlay.enabled:  # lossless: the kept share of the source files
+        size = round(sum(p.rec.size * p.duration / p.rec.duration for p in pieces if p.rec.duration))
+        return size, size / COPY_BYTES_PER_SECOND
+    enc = config.encoding
+    size = seconds = None
+    bps = _bits_per_second(enc.bitrate)
+    if enc.rate_control == "bitrate" and enc.codec != "prores_videotoolbox" and bps:
+        size = round(duration * (bps + AUDIO_BITS_PER_SECOND) / 8)
+    if enc.codec in ("hevc_videotoolbox", "h264_videotoolbox"):
+        scaled = any(output_size(p.rec, config) for p in pieces)
+        seconds = duration / ENCODE_SPEED["1440p" if scaled else "source"]
+    return size, seconds
+
+
+def room(folder: Path) -> tuple[Path, int]:
+    """The folder (its nearest existing parent while it is not created yet) and the free bytes on its drive."""
+    while not folder.exists() and folder != folder.parent:
+        folder = folder.parent
+    return folder, shutil.disk_usage(folder).free
+
+
+def preflight(config: AppConfig, dest_need: float, work_need: float) -> None:
+    """Fails before hours of rendering when the destination is read-only (macOS mounts NTFS that way) or a drive is
+    too small. A film is written twice: as parts in the work folder, then joined in the destination."""
+    (dest, dest_free), (work, work_free) = room(Path(config.output.output_dir).expanduser()), room(work_root(config))
+    if not os.access(dest, os.W_OK):
+        raise StepFailed(f"Cannot write to {dest} (drive unplugged or read-only? macOS mounts NTFS read-only)")
+    if os.stat(dest).st_dev == os.stat(work).st_dev:
+        dest_need, work_need = dest_need + work_need, 0
+    for folder, need, free in ((dest, dest_need, dest_free), (work, work_need, work_free)):
+        if need * 1.05 > free:  # the sizes are estimates: keep 5 % spare
+            raise StepFailed(f"Not enough space in {folder}: the export needs about {need / 1e9:.1f} GB, "
+                             f"{free / 1e9:.1f} GB are free")
+
+
 def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Piece] | None = None) -> Path:
     """Renders the film. `pieces` are the kept ranges from the editor; None renders every recording whole."""
     dest = output_path(group, config)
     if dest.exists() and not config.output.overwrite:
         raise StepFailed(f"{dest} already exists (enable 'overwrite' to replace it)")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Fail before hours of rendering, e.g. an NTFS drive that macOS mounts read-only.
-    if not os.access(dest.parent, os.W_OK):
-        raise StepFailed(f"Cannot write to {dest.parent} (read-only drive? macOS mounts NTFS read-only)")
 
     for r in group.recordings:
         if r.error:
@@ -376,6 +457,8 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
     pieces = plan_pieces(group, None) if pieces is None else pieces
     if not pieces:
         raise StepFailed("Nothing to export: no valid recordings, or every clip was removed in the editor")
+    need = estimate(pieces, config)[0] or 0
+    preflight(config, need, need)
     recordings = list({p.rec.key: p.rec for p in pieces}.values())
 
     base_work = work_root(config) / "exports"
@@ -384,7 +467,7 @@ def process_group(group: Group, config: AppConfig, ctx: Context, pieces: list[Pi
     config_dir = work / "config"
     overlay_on = config.overlay.enabled
     if overlay_on:
-        write_ffmpeg_profile(config, config_dir)
+        write_ffmpeg_profile(config, config_dir, recordings)
         CACHE_DIR.mkdir(exist_ok=True)
 
     errors: list[Exception] = []
@@ -500,7 +583,7 @@ def _overlay_units(pieces: list[Piece], recordings: list[Recording], work: Path,
 
         def plain(reason: str) -> Path:
             ctx.log(f"[{name}] {reason} -> keeping it without overlay")
-            return encode_plain(src, work / f"{name}_plain.mp4", config, uctx, name, unit.duration)
+            return encode_plain(src, rec, work / f"{name}_plain.mp4", config, uctx, name, unit.duration)
 
         if not rec.has_gpmd and config.overlay.fallback_without_overlay:
             rendered = plain("no GPS telemetry stream")
@@ -515,8 +598,8 @@ def _overlay_units(pieces: list[Piece], recordings: list[Recording], work: Path,
                 shutil.copy(Path(config.overlay.layout_xml_path).expanduser(), layout_xml)
             else:
                 track = tracks.get(rec.key)
-                layout_xml.write_text(
-                    generate_layout(config.overlay, rec.width, rec.height, str(track) if track else None))
+                width, height = output_size(rec, config) or (rec.width, rec.height)
+                layout_xml.write_text(generate_layout(config.overlay, width, height, str(track) if track else None))
             try:
                 rendered = render_overlay(src, rec, work / f"{name}_overlay.mp4", layout_xml, config, uctx, name,
                                           config_dir)

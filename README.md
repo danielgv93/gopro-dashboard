@@ -44,6 +44,8 @@ per day:        results in chronological order ──concat (lossless)──► 
 
 - Hardware **decoding and encoding with VideoToolbox** (HEVC/H.264/ProRes on the Apple GPU).
 - HEVC tagged `hvc1`, so it plays in QuickTime, Photos and Finder.
+- **1440p output** (`encoding.resolution`): at 4K the single hardware encoder is the limit (~3.9x realtime). Scaling to 1440p on the GPU before the overlay exports at ~7.8x. It never scales up, and it only applies when the overlay is on.
+- **Estimates before you export**: every film shows its expected size and export time, and the export is refused up front when the output folder is read-only or a drive is too small (the film is written to the temp folder, then joined in the output folder).
 - **Parallel recordings** (`parallel_jobs`): overlay drawing is single-threaded Python, so running several at once uses the cores of Apple Silicon.
 - `caffeinate` keeps the Mac awake while there are jobs.
 - Temp files go in the output folder by default (same disk, so no copies between volumes).
@@ -60,7 +62,7 @@ Everything is edited from the web UI and saved to `config.json`. Main options:
 | Overlay | on/off · generated layout, library default, or **your own XML** · font · margin |
 | Widgets | date/time (strftime format, size, colour, corner) · mini map (size, zoom, opacity, rotation) · full route map · speed |
 | Map | tile style (OSM, Thunderforest, Geoapify…) · API key · GPS filters (DOP, max speed) |
-| Encoding | HEVC/H.264/ProRes on the Apple GPU or x264/x265 on the CPU · constant quality or bitrate · audio copy/AAC · parallelism |
+| Encoding | HEVC/H.264/ProRes on the Apple GPU or x264/x265 on the CPU · constant quality or bitrate · source or 1440p resolution · audio copy/AAC · parallelism |
 
 Sizes are defined for a 1920 px wide frame and scale to the real resolution (2.7K, 4K, 5.3K…).
 

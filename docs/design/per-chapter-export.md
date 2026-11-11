@@ -1,6 +1,6 @@
 # Per-chapter export: keep the encoder busy
 
-**Status:** implemented (§2; §3 is a follow-up) · **Scope:** overlay exports (`overlay.enabled = true`) · **Date:** 2026-10-28
+**Status:** implemented (§2; §3 shipped as 1440p, see its note) · **Scope:** overlay exports (`overlay.enabled = true`) · **Date:** 2026-10-28
 
 Exports with the overlay render one big piece per recording, after joining all its chapters into a single file.
 The hardware encoder, which is the bottleneck, waits about 0.8 h per card while that join runs.
@@ -140,6 +140,11 @@ Job tasks stay keyed by `piece.id` (the UI is unchanged). Each unit reports
 ---
 
 ## 3. Follow-up: 1080p output (separate change, built on units)
+
+> **Implemented 2026-11-11 as `encoding.resolution: "source" | "1440p"`** (not `output.resolution`, not 1080p), with the
+> profile described below: one ffmpeg profile per scaled recording, `--overlay-size`, the layout generated for the scaled
+> frame, and the no-overlay fallback scaled the same way. Measured with 4 units at a time: 7.8x at 1440p versus 3.9x at 4K.
+> The bitrate is not changed automatically: 15M at 4K is about 7M per pixel at 1440p.
 
 At 1080p the encoder is no longer the limit: decoding a single 4K stream is (~207 fps). Units in parallel fix that.
 
