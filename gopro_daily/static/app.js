@@ -87,6 +87,8 @@ const SCHEMA = [
       { path: "encoding.rate_control", label: "Rate control", type: "select", options: [["quality", "Constant quality"], ["bitrate", "Target bitrate"]] },
       { path: "encoding.quality", label: "Quality (1-100)", type: "number", min: 1, max: 100, showIf: c => c.encoding.rate_control === "quality" },
       { path: "encoding.bitrate", label: "Bitrate", type: "text", hint: "e.g. 60M", showIf: c => c.encoding.rate_control === "bitrate" },
+      { path: "encoding.resolution", label: "Resolution", type: "select", options: [["source", "Same as the footage"], ["1440p", "1440p · about twice as fast from 4K"]],
+        hint: "Only with the overlay on and the generated layout. A smaller frame needs less bitrate: 15M at 4K looks like 7M at 1440p" },
       { path: "encoding.hw_decode", label: "Hardware decoding (VideoToolbox)", type: "bool" },
       { path: "encoding.audio", label: "Audio", type: "select", options: [["copy", "Copy original"], ["aac", "Re-encode AAC"]] },
       { path: "encoding.parallel_jobs", label: "Recordings rendered in parallel", type: "number", min: 1, max: 16, hint: "Overlay drawing uses one CPU core per recording" },
@@ -99,7 +101,7 @@ const SCHEMA = [
 const ALL_FIELDS = SCHEMA.flatMap(section => section.fields).filter(field => field.path);
 const fieldsFor = paths => paths.map(path => ALL_FIELDS.find(field => field.path === path));
 // The source folder is chosen in the footage card, next to Scan, so it has no place in the settings panel.
-const ESSENTIAL_PATHS = ["output.output_dir", "grouping.group_by", "overlay.enabled"];
+const ESSENTIAL_PATHS = ["output.output_dir", "encoding.resolution", "encoding.rate_control", "encoding.quality", "encoding.bitrate", "grouping.group_by", "overlay.enabled"];
 const OUTSIDE_SETTINGS = [...ESSENTIAL_PATHS, "source.input_dir"];
 const EXTRA_ADVANCED = new Set(["output.work_dir", "output.keep_intermediates", "grouping.time_source", "grouping.metadata_is_local_time"]);
 // Per-widget settings live in the layout editor (next to the frame they affect), not in the settings panel.
@@ -107,13 +109,13 @@ const WIDGET_GROUPS = [["datetime", "Date & time"], ["minimap", "Mini map"], ["j
   id: key, title, fields: ALL_FIELDS.filter(f => f.path.startsWith(`overlay.${key}.`) || (key === "speed" && f.path === "overlay.units_speed")),
 }));
 const SETTINGS_SECTIONS = [
-  { id: "essentials", title: "Essentials", description: "Everything you need to start a film", fields: fieldsFor(ESSENTIAL_PATHS) },
+  { id: "essentials", title: "Main settings", description: "Where your films go and how they look", fields: fieldsFor(ESSENTIAL_PATHS) },
   { id: "appearance", title: "Overlay & appearance", description: "Layout, maps and GPS", groups: [
     { id: "layout", title: "General layout", fields: fieldsFor(["overlay.layout_mode", "overlay.layout_xml_path", "overlay.margin", "overlay.font", "overlay.extra_args"]) },
     { id: "maps", title: "Maps & GPS", fields: fieldsFor(["overlay.map_style", "overlay.map_api_key", "overlay.gps_dop_max", "overlay.gps_speed_max", "overlay.fallback_without_overlay"]) },
   ] },
   { id: "files", title: "Files & grouping", description: "File names, recording times and grouping", fields: ALL_FIELDS.filter(f => /^(source|output|grouping)\./.test(f.path) && !OUTSIDE_SETTINGS.includes(f.path)) },
-  { id: "quality", title: "Quality & performance", description: "Video, audio and rendering", fields: ALL_FIELDS.filter(f => f.path.startsWith("encoding.")) },
+  { id: "quality", title: "Encoding & performance", description: "Encoder, audio and rendering", fields: ALL_FIELDS.filter(f => f.path.startsWith("encoding.") && !OUTSIDE_SETTINGS.includes(f.path)) },
 ];
 
 let OPTIONS = { map_styles: ["osm"] };
@@ -182,7 +184,7 @@ function toast(message, kind = "info") {
 // ---------------------------------------------------------------------------------------------- settings form
 let config = null;
 let saveTimer = null;
-const openSections = new Set(["essentials"]);
+const openSections = new Set();
 let settingsQuery = "";
 const normalizeSearch = value => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 
@@ -200,7 +202,7 @@ function sectionSummary(section) {
   if (section.id === "quality") {
     const codec = config.encoding.codec;
     const name = codec.includes("265") || codec.includes("hevc") ? "HEVC" : codec.includes("264") ? "H.264" : "ProRes";
-    return `${name} · ${config.encoding.rate_control === "quality" ? `Quality ${config.encoding.quality}` : config.encoding.bitrate}`;
+    return `${name} encoder · ${config.encoding.parallel_jobs} in parallel`;
   }
   if (section.id === "appearance") {
     const count = ["datetime", "minimap", "journey_map", "speed"].filter(key => config.overlay[key].enabled).length;
@@ -232,6 +234,16 @@ function renderSettings() {
     return visible.length;
   };
   for (const section of SETTINGS_SECTIONS) {
+    if (section.id === "essentials" && !query) {
+      // The main settings are always in view, above everything else; search falls back to plain fields.
+      root.append(
+        el("section", { class: "settings-main", "aria-labelledby": "settings-main-title" },
+          el("div", { class: "settings-main-head" }, el("span", { class: "eyebrow" }, "Export"),
+            el("h2", { id: "settings-main-title" }, section.title), el("p", {}, section.description)),
+          renderEssentials()),
+        el("h3", { class: "settings-more-title" }, "More settings", el("small", {}, "Fine-tune when you need to")));
+      continue;
+    }
     const details = settingsDetails(section.id, section.title, sectionSummary(section), !!query);
     const before = matches;
     if (section.groups) {
@@ -241,10 +253,6 @@ function renderSettings() {
         child.className = "settings-group";
         if (appendFields(child, group.fields, `${section.title} ${group.title}`, group.id)) details.append(child);
       }
-    } else if (section.id === "essentials" && !query) {
-      details.classList.add("essentials");
-      details.append(renderEssentials());
-      matches += section.fields.length;
     } else appendFields(details, section.fields, section.title, section.id);
     if (matches > before) root.append(details);
   }
@@ -261,7 +269,7 @@ function renderSettings() {
     const text = [el("strong", {}, group.title), ` · ${found.length} ${found.length === 1 ? "setting" : "settings"} in the layout editor.`];
     redirects.push(layoutEditable()
       ? redirectNote(text, "Open", () => openLayoutEditor(group.id))
-      : redirectNote([...text, " Turn the overlay on in Essentials to edit them."]));
+      : redirectNote([...text, " Turn the overlay on in Main settings to edit them."]));
   }
   matches += redirects.length;
   root.prepend(...redirects);
@@ -322,7 +330,7 @@ function describePath(path) {
   return { name: rest.at(-1), crumbs: crumbs.length > 3 ? [crumbs[0], "…", ...crumbs.slice(-2)] : crumbs };
 }
 
-// One folder control, used for both the source (footage card) and the output (Essentials).
+// One folder control, used for both the source (footage card) and the output (main settings).
 // Shows the folder the way a person names it; the full path is one click away for typing.
 function folderCard({ path, caption, iconName, emptyName, emptyHint, variant = "", onCommit }) {
   const card = el("div", { class: `ess-folder ${variant}` });
@@ -386,31 +394,15 @@ function renderSource() {
   }
 }
 
-// Copying the scanned footage to the internal SSD: exports then read fast storage instead of a slow SD card.
+// Whole-card copies made by older versions, still usable as the source. New copies are a phase of each export job.
 let copyState = { status: "idle" };
 let copyTimer = null;
 
 async function pollCopy() {
   clearTimeout(copyTimer);
-  const before = copyState.status;
   try { copyState = await api("GET", "/api/copy"); } catch { return; }
-  if (before === "running" && copyState.status === "done") {
-    config = await api("GET", "/api/config");  // the server switched the source folder to the copy
-    renderSource();
-    toast("Footage copied. Now using the copy on this Mac");
-    doScan();
-  }
   renderCopy();
   if (copyState.status === "running") copyTimer = setTimeout(pollCopy, 1000);
-}
-
-async function startCopy() {
-  try {
-    clearTimeout(saveTimer);
-    config = await api("PUT", "/api/config", config);
-    copyState = await api("POST", "/api/copy");
-    pollCopy();
-  } catch (e) { toast(e.message, "error"); }
 }
 
 async function deleteCopy() {
@@ -433,35 +425,14 @@ async function deleteCopy() {
 
 function renderCopy() {
   const st = copyState;
-  const slot = $("#copy-slot");
-  if (st.status !== "running" && !st.local && (!scanned || !groups.length)) return slot.replaceChildren();
-  let body, actions;
-  if (st.local) {
-    const origin = st.local.origin ? describePath(st.local.origin) : null;
-    body = [el("strong", {}, "Using the copy on this Mac"),
-      el("span", { class: "muted small" }, `${fmtSize(st.local.size)}${origin ? ` · copied from ${origin.crumbs[0]} › ${origin.name}` : ""}. Delete it once your films are exported.`)];
-    actions = el("button", { class: "button compact ghost danger", type: "button", onclick: deleteCopy }, "Delete copy");
-  } else if (st.status === "running") {
-    const frac = st.total ? st.copied / st.total : 0;
-    const elapsed = Date.now() / 1000 - st.started;
-    const eta = frac > 0.01 ? elapsed / frac - elapsed : null;
-    body = [el("strong", {}, "Copying footage to this Mac…"),
-      el("span", { class: "muted small" }, `${fmtSize(st.copied)} of ${fmtSize(st.total)} · file ${Math.min(st.files_done + 1, st.files)} of ${st.files}${eta ? ` · ~${fmtDuration(eta)} left` : ""}`),
-      el("div", { class: "bar" }, el("div", { style: `width:${Math.round(frac * 100)}%` }))];
-    actions = el("button", { class: "button compact ghost danger", type: "button", onclick: async () => { await api("POST", "/api/copy/cancel"); pollCopy(); } }, "Cancel");
-  } else {
-    const size = groups.reduce((s, g) => s + g.size, 0);
-    const failed = st.status === "failed";
-    body = [el("strong", {}, failed ? "The copy stopped" : "Copy footage to this Mac"),
-      el("span", { class: failed ? "small copy-error" : "muted small" }, failed ? st.error
-        : `Exports read the source at its speed. Copy ~${fmtSize(size)} to the internal SSD once and export from there. Files already copied are skipped.`)];
-    actions = el("button", { class: "button compact", type: "button", onclick: startCopy },
-      failed || st.status === "cancelled" ? "Resume copy" : "Copy to Mac");
-  }
-  const finder = st.local || st.status === "running"
-    ? el("button", { class: "button compact ghost", type: "button", onclick: () => api("POST", "/api/copy/open").catch(e => toast(e.message, "error")) }, "Show in Finder")
-    : null;
-  slot.replaceChildren(el("div", { class: "copy-bar" }, icon("laptop"), el("div", { class: "copy-body" }, ...body), el("div", { class: "copy-actions" }, finder, actions)));
+  $("#copy-first-row").hidden = !!st.local || st.status === "running";
+  const origin = st.local?.origin ? describePath(st.local.origin) : null;
+  $("#copy-slot").replaceChildren(st.local ? el("div", { class: "copy-bar" }, icon("laptop"),
+    el("div", { class: "copy-body" }, el("strong", {}, "Using the copy on this Mac"),
+      el("span", { class: "muted small" }, `${fmtSize(st.local.size)}${origin ? ` · copied from ${origin.crumbs[0]} › ${origin.name}` : ""}. Delete it once your films are exported.`)),
+    el("div", { class: "copy-actions" },
+      el("button", { class: "button compact ghost", type: "button", onclick: () => api("POST", "/api/copy/open").catch(e => toast(e.message, "error")) }, "Show in Finder"),
+      el("button", { class: "button compact ghost danger", type: "button", onclick: deleteCopy }, "Delete copy"))) : "");
 }
 
 // One card at a time: the header steps are the wizard's navigation.
@@ -500,7 +471,7 @@ function redirectNote(content, action, onclick) {
 
 // What the Overlay section says about widgets, which are configured in the layout editor.
 function widgetsEntry() {
-  if (!config.overlay.enabled) return el("p", { class: "settings-note" }, "Overlay is off. Turn it on in Essentials to add widgets such as the clock or maps.");
+  if (!config.overlay.enabled) return el("p", { class: "settings-note" }, "Overlay is off. Turn it on in Main settings to add widgets such as the clock or maps.");
   if (!layoutEditable()) return el("p", { class: "settings-note" }, "Widgets apply to the generated layout. Choose it under General layout to arrange them.");
   const shown = WIDGET_NAMES.filter(([key]) => config.overlay[key].enabled).map(([, label]) => label);
   return el("div", { class: "settings-widgets" },
@@ -525,15 +496,21 @@ function renderEssentials() {
     scheduleSave(field(path));
   };
 
+  const segmented = (path, choices, labelledby, disabled = false) =>
+    el("div", { class: "ess-segmented", role: "radiogroup", "aria-labelledby": labelledby },
+      choices.map(([value, label]) => el("label", {},
+        el("input", { type: "radio", name: `ess-${path}`, value, disabled, checked: value === get(config, path),
+          id: value === get(config, path) ? `f-${path}` : undefined,
+          onchange: () => { update(path, value); renderSettings(); } }),
+        el("span", {}, label))));
   const groupBy = config.grouping.group_by;
-  const segmented = el("div", { class: "ess-segmented", role: "radiogroup", "aria-labelledby": "ess-group-title" },
-    GROUP_CHOICES.map(([value, label]) => el("label", {},
-      el("input", { type: "radio", name: "ess-group-by", value, checked: value === groupBy,
-        id: value === groupBy ? "f-grouping.group_by" : undefined,
-        onchange: () => { update("grouping.group_by", value); renderSettings(); } }),
-      el("span", {}, label))));
-
   const overlayOn = config.overlay.enabled;
+  const enc = config.encoding;
+  // Without the overlay clips are joined as recorded, so the video settings stay editable but read as idle.
+  const idle = overlayOn ? "" : " is-idle";
+  const idleNote = "Not used while the overlay is off: clips are joined as recorded.";
+  const canScale = config.overlay.layout_mode === "generated";
+  const prores = enc.codec === "prores_videotoolbox";
   const widgets = WIDGET_NAMES.filter(([key]) => config.overlay[key].enabled).map(([, label]) => label);
   const overlay = el("label", { class: `ess-overlay${overlayOn ? " is-on" : ""}` },
     el("span", { class: "ess-overlay-text" },
@@ -558,13 +535,29 @@ function renderEssentials() {
       el("h4", { class: "ess-heading" }, "Save films to"),
       folderCard({ path: "output.output_dir", caption: "Output", iconName: "film",
         emptyName: "Not chosen yet", emptyHint: "Type a folder path",
-        onCommit: v => { update("output.output_dir", v); renderSettings(); } })),
+        onCommit: v => { update("output.output_dir", v); renderSettings(); } }),
+      destRoom()),
+    el("div", { class: `ess-block${idle}` },
+      el("h4", { class: "ess-heading", id: "ess-res-title" }, "Resolution"),
+      segmented("encoding.resolution", [["source", "Same as footage"], ["1440p", "1440p"]], "ess-res-title", overlayOn && !canScale),
+      el("p", { class: "ess-hint" }, !overlayOn ? idleNote
+        : !canScale ? "1440p needs the generated overlay layout: this one is tied to the footage size."
+        : enc.resolution === "1440p" ? "About twice as fast from 4K. A smaller frame needs less bitrate: 15M at 4K looks like 7M at 1440p."
+        : "Films keep the camera's frame size.")),
+    el("div", { class: `ess-block${idle}` },
+      el("h4", { class: "ess-heading", id: "ess-rate-title" }, "Quality"),
+      prores ? null : segmented("encoding.rate_control", [["quality", "Constant quality"], ["bitrate", "Target bitrate"]], "ess-rate-title"),
+      el("p", { class: "ess-hint" }, !overlayOn ? idleNote
+        : prores ? "ProRes HQ has a fixed quality. Pick another encoder under Encoding & performance to choose one."
+        : enc.rate_control === "quality" ? "Same look throughout; the file size depends on the footage."
+        : "Predictable file size, whatever the footage."),
+      prores ? null : renderField(field(enc.rate_control === "quality" ? "encoding.quality" : "encoding.bitrate"))),
     el("div", { class: "ess-block" },
       el("h4", { class: "ess-heading", id: "ess-group-title" }, "One film per"),
-      segmented,
+      segmented("grouping.group_by", GROUP_CHOICES, "ess-group-title"),
       el("p", { class: "ess-hint" }, GROUP_CHOICES.find(([v]) => v === groupBy)?.[2] || "")),
     el("div", { class: "ess-block" },
-      el("h4", { class: "ess-heading" }, "Look"),
+      el("h4", { class: "ess-heading" }, "Overlay"),
       el("div", { class: "ess-overlay-card" }, overlay, thumb, chips)));
 }
 
@@ -639,6 +632,7 @@ function scheduleSave(field) {
     try {
       config = await api("PUT", "/api/config", config);
       $("#save-state").textContent = "Settings saved";
+      refreshEstimates();
       if (!field || field.path.startsWith("overlay")) renderPreview();
     } catch (e) {
       $("#save-state").textContent = "Invalid setting";
@@ -650,6 +644,29 @@ function scheduleSave(field) {
 // ---------------------------------------------------------------------------------------------- scan
 let groups = [];
 let scanned = false;
+
+// Size and export time of each film with the current settings and edits, and the room left in the output folder.
+let estimates = { films: {}, destination: null };
+let estimateSeq = 0;
+const fmtEstimate = e => [e?.size ? `≈ ${fmtSize(e.size)}` : null, e?.seconds ? `≈ ${fmtGap(e.seconds)} to export` : null]
+  .filter(Boolean).join(" · ");
+
+function destRoom() {
+  const d = estimates.destination;
+  return el("p", { class: `ess-hint${d && !d.writable ? " warn" : ""}`, id: "dest-room" },
+    !d ? "" : d.writable ? `${fmtSize(d.free)} free` : "Cannot write here: drive unplugged or read-only (macOS mounts NTFS read-only)");
+}
+
+async function refreshEstimates() {
+  const seq = ++estimateSeq;
+  let fresh;
+  try { fresh = await api("GET", "/api/estimate"); } catch { return; }
+  if (seq !== estimateSeq) return;  // a newer request is on its way: this answer has older settings
+  estimates = fresh;
+  document.querySelectorAll(".day-estimate").forEach(n => { n.textContent = fmtEstimate(estimates.films[n.dataset.key]); });
+  $("#dest-room")?.replaceWith(destRoom());
+  updateSelection();
+}
 
 async function doScan() {
   const btn = $("#btn-scan");
@@ -710,6 +727,7 @@ function renderGroups() {
   $("#group-filter").value = "";
   groups.forEach((g, index) => root.append(renderDayCard(g, index)));
   updateSelection();
+  refreshEstimates();
   pollCopy();
 }
 
@@ -743,7 +761,8 @@ function renderDayCard(g, index) {
           dayFact(clips, clips === 1 ? "clip" : "clips"),
           dayFact(sessions, sessions === 1 ? "session" : "sessions"),
           g.total_pause_seconds ? dayFact(fmtGap(g.total_pause_seconds), "paused", "pause") : null,
-          dayFact(fmtSize(g.size), "")),
+          dayFact(fmtSize(g.size), ""),
+          el("span", { class: "day-fact day-estimate", "data-key": g.key }, fmtEstimate(estimates.films[g.key]))),
         renderTimeline(g)),
       el("button", { class: `button preview-day${edited ? " edited" : ""}`, type: "button",
         title: edited ? "Reopen the editor to change the cuts" : "Watch every clip back to back, trim and remove parts",
@@ -766,6 +785,7 @@ function refreshDayCard(g) {
   card.hidden = old.hidden;
   card.querySelector(".group-select").checked = old.querySelector(".group-select").checked;
   old.replaceWith(card);
+  refreshEstimates();
 }
 
 function renderTimeline(g) {
@@ -847,12 +867,15 @@ async function processSelected() {
   try {
     clearTimeout(saveTimer);
     config = await api("PUT", "/api/config", config);
-    await api("POST", "/api/jobs", { keys });
-    toast(`${keys.length} ${keys.length === 1 ? "film" : "films"} added to the export queue`);
+    const copyFirst = !$("#copy-first-row").hidden && $("#copy-first").checked;
+    await api("POST", "/api/jobs", { keys, copy_first: copyFirst });
+    toast(`${keys.length} ${keys.length === 1 ? "film" : "films"} added to the export queue${copyFirst ? ": each one copies its footage to this Mac first" : ""}`);
+    pollCopy();
     pollJobs();
     goToStep(2);
   } catch (e) {
     toast(e.message, "error");
+    refreshEstimates();
   } finally {
     btn.textContent = "Process selected";
     updateSelection();
@@ -866,10 +889,17 @@ function updateSelection() {
   all.checked = checks.length > 0 && selected === checks.length;
   all.indeterminate = selected > 0 && selected < checks.length;
   $("#selection-count").textContent = checks.length ? `${selected} of ${checks.length} selected` : "";
-  $("#btn-process").disabled = selected === 0;
+  const picked = checks.filter(c => c.checked).map(c => estimates.films[c.dataset.key]).filter(Boolean);
+  const total = { size: picked.reduce((s, e) => s + (e.size || 0), 0), seconds: picked.reduce((s, e) => s + (e.seconds || 0), 0) };
+  const d = estimates.destination;
+  const blocked = selected > 0 && !!d && (!d.writable || total.size > d.free);
+  $("#btn-process").disabled = selected === 0;  // `blocked` only warns: the server checks again when you submit
   $("#btn-process").textContent = selected ? `Process ${selected} selected` : "Process selected";
   $("#process-title").textContent = selected ? `${selected} ${selected === 1 ? "film" : "films"} ready` : "Ready to export?";
-  $("#process-hint").textContent = selected ? "" : "Select at least one film from the scanned footage.";
+  $("#process-hint").textContent = !selected ? "Select at least one film from the scanned footage."
+    : !blocked ? fmtEstimate(total)
+    : d.writable ? `Needs ≈ ${fmtSize(total.size)}, but the output folder has ${fmtSize(d.free)} free` : "The output folder cannot be written";
+  $("#process-hint").classList.toggle("warn", blocked);
   renderExportOverlay();
 }
 
@@ -952,19 +982,32 @@ function renderJobs(jobs) {
         el("strong", {}, j.group),
         el("span", { class: `badge ${j.status}` }, j.cancelling ? "stopping" : j.status),
         el("span", { class: "job-meta" }, `${j.recordings} rec · ${fmtDuration(j.duration)}`),
+        j.status === "queued" && j.copy ? el("span", { class: "job-meta" }, copyNote(j.copy)) : null,
         el("span", { class: "spacer" }),
         el("span", { class: "job-meta" }, j.started ? `${fmtDuration(elapsed)} elapsed${eta ? ` · ~${fmtDuration(eta)} left` : ""}` : ""),
         el("button", { class: "ghost", onclick: () => openLog(j) }, "View log"),
         j.status === "done" ? el("button", { class: "ghost", onclick: () => api("POST", "/api/reveal", { path: j.output }) }, "Show in Finder") : null,
         (j.status === "running" || j.status === "queued") ? el("button", { class: "ghost danger", disabled: j.cancelling, onclick: async e => { e.currentTarget.disabled = true; e.currentTarget.textContent = "Stopping…"; await api("POST", `/api/jobs/${j.id}/cancel`); pollJobs(); } }, j.cancelling ? "Stopping…" : "Cancel") : null),
-      j.status === "running" ? renderJobLive(j, elapsed, eta) : el("div", { class: "bar" }, el("div", { style: `width:${pct}%` })),
+      j.status === "running" ? renderJobLive(j, elapsed, eta)
+        : el("div", { class: "bar" }, el("div", { style: `width:${j.status === "queued" && j.copy ? Math.round(copyFrac(j.copy) * 100) : pct}%` })),
       j.status === "done" ? renderJobDone(j, elapsed) : null,
       j.error ? el("div", { class: "error" }, j.error) : null,
       j.output && j.status === "done" ? el("div", { class: "muted small output-path" }, j.output) : null);
   }));
 }
 
-const PHASES = { join: "Join chapters", overlay: "Draw overlay", concat: "Final video" };
+const PHASES = { copy: "Copy to Mac", join: "Join chapters", overlay: "Draw overlay", concat: "Final video" };
+const copyFrac = c => c.total ? c.copied / c.total : 1;
+// Average since this film's copy started: bytes per second, or 0 until a few seconds have passed.
+const copySpeed = c => c.started && Date.now() / 1000 - c.started > 2 ? c.copied / (Date.now() / 1000 - c.started) : 0;
+const copyLeft = c => copySpeed(c) ? (c.total - c.copied) / copySpeed(c) : null;
+const copyNote = c => ({
+  pending: "Copies to this Mac after the films before it",
+  waiting: "Waiting for room on this Mac to copy",
+  copying: `Copying to this Mac · ${Math.round(copyFrac(c) * 100)}%${copySpeed(c) ? ` · ${fmtSize(copySpeed(c))}/s · ~${fmtDuration(copyLeft(c))} left` : ""}`,
+  done: "Copied to this Mac · waiting its turn",
+  failed: "The copy to this Mac failed",
+})[c.state];
 const fmtSpeed = x => x >= 10 ? `${Math.round(x)}×` : `${x.toFixed(1)}×`;
 const svgBox = (cls, markup, label) => {
   const box = el("div", { class: cls, role: "img", "aria-label": label });
@@ -989,14 +1032,16 @@ function throughput(history, window = 30) {
 }
 
 function renderJobLive(j, elapsed, eta) {
-  const pct = Math.round(j.progress * 100);
+  const copying = j.copy && j.copy.state !== "done";  // the first phase: the export starts once the footage is here
+  const progress = copying ? copyFrac(j.copy) : j.progress;
+  const pct = Math.round(progress * 100);
   const pieces = j.tasks.filter(t => t.id !== "group");
   const final = j.tasks.find(t => t.id === "group");
-  const phases = [j.overlay ? "overlay" : "join", "concat"];  // overlay renders straight from the chapters
+  const phases = [...(j.copy ? ["copy"] : []), j.overlay ? "overlay" : "join", "concat"];  // overlay renders straight from the chapters
   // clips that fall back to no overlay never report it, so the final concat closes every earlier phase
   const isDone = t => t.finished || (t.id !== "group" && final.stage === "concat");
   const isWorking = t => !isDone(t) && t.stage !== "pending" && t.progress < 1;  // stage done = waiting for the final concat
-  const phaseDone = ph => ph === "concat" ? final.finished : final.stage === "concat" ||
+  const phaseDone = ph => ph === "copy" ? !copying : ph === "concat" ? final.finished : final.stage === "concat" ||
     pieces.every(t => t.stages.indexOf(t.stage) > t.stages.indexOf(ph) || (t.stage === ph && t.progress >= 1));
   const current = phases.findIndex(ph => !phaseDone(ph));
   const speeds = throughput(j.history);
@@ -1004,11 +1049,15 @@ function renderJobLive(j, elapsed, eta) {
 
   const r = 34, c = 2 * Math.PI * r;
   const ring = svgBox("job-ring", `<svg viewBox="0 0 80 80"><circle cx="40" cy="40" r="${r}" class="ring-track"/>` +
-    `<circle cx="40" cy="40" r="${r}" class="ring-fill" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - j.progress)}"/></svg>` +
+    `<circle cx="40" cy="40" r="${r}" class="ring-fill" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - progress)}"/></svg>` +
     `<b>${pct}<small>%</small></b>`, `${pct}% done`);
 
   const stat = (value, label, cls = "") => el("div", { class: `job-stat ${cls}` }, el("b", {}, value), el("span", {}, label));
-  const stats = el("div", { class: "job-stats" },
+  const stats = copying ? el("div", { class: "job-stats" },
+    stat(fmtDuration(elapsed), "Elapsed"),
+    stat(copyLeft(j.copy) ? `~${fmtDuration(copyLeft(j.copy))}` : "—", "Copy left"),
+    stat(copySpeed(j.copy) ? `${fmtSize(copySpeed(j.copy))}/s` : "—", "Copy speed", "accent"),
+    stat(fmtSize(j.copy.copied), `of ${fmtSize(j.copy.total)} copied`)) : el("div", { class: "job-stats" },
     stat(fmtDuration(elapsed), "Elapsed"),
     stat(eta ? `~${fmtDuration(eta)}` : "—", "Left"),
     stat(speed ? fmtSpeed(speed) : "—", "Speed · footage/time", "accent"),
@@ -1051,7 +1100,8 @@ function renderJobLive(j, elapsed, eta) {
 
   return el("div", { class: "job-live" },
     el("div", { class: "job-hero" }, ring, el("div", { class: "job-hero-main" }, stepper,
-      j.activity ? el("p", { class: "job-activity", "aria-live": "polite" }, el("span", {}, "Now"), j.activity) : null, stats)),
+      copying || j.activity ? el("p", { class: "job-activity", "aria-live": "polite" }, el("span", {}, "Now"),
+        copying ? copyNote(j.copy) : j.activity) : null, stats)),
     spark,
     el("div", { class: "lanes" },
       el("div", { class: "lanes-head" },
@@ -1114,6 +1164,8 @@ async function boot() {
   document.querySelectorAll(".steps button").forEach(b => { b.onclick = () => goToStep(b.dataset.step); });
   $("#btn-back").onclick = () => goToStep(1);
   goToStep(1);
+  refreshEstimates();
+  window.addEventListener("focus", refreshEstimates);  // a drive may have been plugged in meanwhile
   $("#btn-clear").onclick = async () => { await api("DELETE", "/api/jobs"); pollJobs(); };
   $("#btn-cache").onclick = clearCache;
   $("#btn-doctor").onclick = openDoctor;

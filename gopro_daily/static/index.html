@@ -27,11 +27,6 @@
 
 <div class="app-shell">
   <aside class="settings-panel" aria-label="Project settings">
-    <div class="settings-heading">
-      <span class="eyebrow">Project</span>
-      <h2>Settings</h2>
-      <p>Start with the essentials. Fine-tune when you need to.</p>
-    </div>
     <div class="settings-search-tools">
       <label class="sr-only" for="settings-search">Search all settings</label>
       <div class="settings-search-row">
@@ -88,6 +83,9 @@
           <strong id="process-title">Ready to export?</strong>
           <span id="process-hint">Select at least one film.</span>
           <span id="process-overlay" class="process-overlay"></span>
+          <label id="copy-first-row" class="copy-first" title="Exports read the source at its speed. Each film first copies its footage to the internal SSD, then exports from there while the next film copies. Each copy is deleted once its film is exported.">
+            <input id="copy-first" type="checkbox"> Copy the footage to this Mac first
+          </label>
         </div>
         <button id="btn-process" class="button primary large" type="button" disabled>Process selected</button>
       </div>

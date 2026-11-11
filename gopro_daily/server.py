@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import webbrowser
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -18,10 +21,10 @@ from pydantic import BaseModel, ValidationError
 
 from .config import AppConfig, load_config, save_config
 from .edits import OVERLAY_MIN_SECONDS, Cut, EditStore, edit_summary, make_edit, plan_pieces
-from .ingest import FootageCopy, copy_origin
+from .ingest import SPACE_MARGIN, FootageCopy, copy_origin
 from .jobs import JobManager, reveal_in_finder
 from .layout import build_widgets
-from .pipeline import dashboard_bin, ffmpeg_bin, work_root
+from .pipeline import StepFailed, dashboard_bin, estimate, ffmpeg_bin, preflight, room, work_root
 from .scanner import Chapter, Group, scan
 
 STATIC = Path(__file__).parent / "static"
@@ -149,30 +152,6 @@ def copy_status() -> dict:
     return status
 
 
-@app.post("/api/copy")
-def start_copy() -> dict:
-    """Copies the scanned files next to the export work files; when done, the copy becomes the source folder."""
-    config: AppConfig = state["config"]
-    source = Path(config.source.input_dir).expanduser()
-    if not state["media"]:
-        raise HTTPException(400, "Scan the footage first")
-    if source.is_relative_to(_footage_root()):
-        raise HTTPException(400, "This footage is already on this Mac")
-
-    def done(src: Path, dest: Path) -> None:
-        current: AppConfig = state["config"]
-        if Path(current.source.input_dir).expanduser() == src:  # the user may have picked another folder meanwhile
-            current.source.input_dir = str(dest)
-            save_config(current)
-        edits.move_footage(str(src), str(dest))
-
-    try:
-        footage_copy.start(list(state["media"].values()), source, _footage_root() / (source.name or "footage"), done)
-    except (ValueError, OSError) as e:
-        raise HTTPException(400, str(e)) from e
-    return copy_status()
-
-
 @app.delete("/api/copy")
 def delete_copy() -> dict:
     """Deletes the local copy in use and points the source back at the folder it was copied from."""
@@ -215,16 +194,10 @@ def cache_status() -> dict:
 @app.delete("/api/cache")
 def clear_cache() -> dict:
     """Deletes leftover export work files (cancelled, failed or kept runs). Footage copies are left alone."""
-    if any(j.status in ("queued", "running") for j in jobs.jobs.values()):
-        raise HTTPException(400, "Wait for the exports to finish or cancel them first")
+    if footage_copy.running or any(j.status in ("queued", "running") for j in jobs.jobs.values()):
+        raise HTTPException(400, "Wait for the copy and the exports to finish or cancel them first")
     shutil.rmtree(_exports_cache(), ignore_errors=True)
     return cache_status()
-
-
-@app.post("/api/copy/cancel")
-def cancel_copy() -> dict:
-    footage_copy.cancel()
-    return copy_status()
 
 
 # ----------------------------------------------------------------------------- film edits (footage editor)
@@ -301,6 +274,7 @@ def media_thumb(media_id: str) -> FileResponse:
 
 class JobRequest(BaseModel):
     keys: list[str]
+    copy_first: bool = False  # copy the footage to this Mac, then queue the exports from the copy
 
 
 @app.post("/api/jobs")
@@ -316,7 +290,94 @@ def create_jobs(req: JobRequest) -> list[dict]:
     empty = [groups[k].label for k, pieces in plans.items() if not pieces]
     if empty:
         raise HTTPException(400, f"Nothing left to export in {', '.join(empty)}: every clip was removed in the editor")
+    sizes = [estimate(pieces, config)[0] or 0 for pieces in plans.values()]
+    try:
+        preflight(config, sum(sizes), max(sizes, default=0))  # work files are deleted after each film, the films stay
+    except StepFailed as e:
+        raise HTTPException(400, str(e)) from e
+    if req.copy_first and not _local_copy():
+        (work, free), dest = room(work_root(config)), room(Path(config.output.output_dir).expanduser())[0]
+        # Besides the footage, this drive holds one film's work files, and the films too when it is also the destination.
+        reserved = max(sizes) + (sum(sizes) if os.stat(dest).st_dev == os.stat(work).st_dev else 0) + SPACE_MARGIN
+        # export with the settings chosen now, not whatever is set when each copy ends
+        _copy_films(req.keys, groups, plans, config.model_copy(deep=True), free, reserved)
+        return []
     return [jobs.submit(groups[k], config, plans[k]).summary() for k in req.keys]
+
+
+def _copy_films(keys: list[str], groups: dict[str, Group], plans: dict, config: AppConfig, free: int, reserved: int) -> None:
+    """Queues every film now, each with "copy to this Mac" as its first phase. Only the chapters the films use are
+    copied, one film at a time, so the next film copies while the previous one exports. A film is only copied once
+    there is room for it next to the films still exporting, and its files are deleted when its export ends."""
+    source = Path(config.source.input_dir).expanduser()
+    dest = _exports_cache() / f"source-{time.strftime('%Y%m%d%H%M%S')}"  # under exports/: Clear cache removes leftovers
+    batches = []
+    for k in keys:
+        used = {p.rec.key for p in plans[k]}
+        batches.append([(c.path, dest / c.path.relative_to(source)) for r in groups[k].recordings if r.key in used for c in r.chapters])
+    sizes = [sum(s.stat().st_size for s, _ in b) for b in batches]
+    biggest = max(range(len(keys)), key=lambda i: sizes[i])
+    if sizes[biggest] + reserved > free:
+        raise HTTPException(400, f"Not enough space on this Mac to copy {groups[keys[biggest]].label}: it needs about "
+                                 f"{(sizes[biggest] + reserved) / 1e9:.1f} GB with its export files, {free / 1e9:.1f} GB are free")
+    if footage_copy.running:
+        raise HTTPException(400, "Wait for the films being copied to start exporting, or cancel them")
+
+    queued = []
+    for k, files, size in zip(keys, batches, sizes):
+        local = copy.deepcopy(groups[k])  # same recording keys, so the editor cuts still apply
+        for r in local.recordings + local.duplicates:
+            for c in r.chapters:
+                c.path, c.lrv, c.thm = dest / c.path.relative_to(source), None, None
+        targets = [d for _, d in files]
+        queued.append(jobs.submit(local, config, plan_pieces(local, edits.get(k)),
+                                  cleanup=lambda targets=targets: [f.unlink(missing_ok=True) for f in targets],
+                                  copy={"state": "pending", "copied": 0, "total": size, "error": ""}))
+
+    def exporting() -> int:  # films copied whose export has not ended: their files are still here
+        return sum(sizes[j] for j, job in enumerate(queued) if job.copy["state"] == "done" and job.finished is None)
+
+    def before(i: int) -> bool:
+        job = queued[i]
+        if exporting() + sizes[i] + reserved > free:
+            job.copy["state"] = "waiting"  # always ends: every film copied before it finishes exporting
+            footage_copy.wait(lambda: job.finished is not None or exporting() + sizes[i] + reserved <= free)
+        if job.finished is not None:  # cancelled before its turn
+            return False
+        job.copy.update(state="copying", started=time.time())  # the UI derives the copy speed from it
+        return True
+
+    def dropped(i: int) -> bool:  # its export was cancelled while the files were copying
+        job = queued[i]
+        return job.finished is not None or (job.ctx is not None and job.ctx.cancel_event.is_set())
+
+    def progress(i: int, n: int) -> None:
+        queued[i].copy["copied"] += n
+
+    def done(i: int) -> None:
+        queued[i].copy["state"] = "done"
+        if queued[i].finished is not None:  # cancelled just as its last file landed: nothing else deletes them
+            queued[i].cleanup()
+
+    def ended(status: str, error: str) -> None:
+        for job in queued:
+            if job.copy["state"] != "done" and job.finished is None:
+                job.copy.update(state="failed", error=error or "the copy was stopped")
+
+    footage_copy.start_films(batches, source, dest, before=before, done=done, dropped=dropped, progress=progress, ended=ended)
+
+
+@app.get("/api/estimate")
+def get_estimate() -> dict:
+    """Size and export time of every scanned film with the current settings and edits, and the room left for them."""
+    config: AppConfig = state["config"]
+    films = {k: dict(zip(("size", "seconds"), estimate(plan_pieces(g, edits.get(k)), config)))
+             for k, g in state["groups"].items()}
+    destination = None
+    if config.output.output_dir:
+        folder, free = room(Path(config.output.output_dir).expanduser())
+        destination = {"free": free, "writable": os.access(folder, os.W_OK)}
+    return {"films": films, "destination": destination}
 
 
 @app.get("/api/jobs")

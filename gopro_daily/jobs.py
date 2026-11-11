@@ -11,6 +11,7 @@ import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from .config import AppConfig
 from .edits import Piece
@@ -38,6 +39,10 @@ class Job:
     log_offset: int = 0  # number of lines dropped from the front of `logs`
     history: deque = field(default_factory=lambda: deque(maxlen=720))  # (elapsed s, footage s done), every 5 s
     ctx: Context | None = None
+    cleanup: Callable[[], None] | None = None  # runs once the job ends, however it ends (deletes copied footage)
+    # Set when the footage is first copied to this Mac: {"state": pending|waiting|copying|done|failed, "copied",
+    # "total", "error", "started" (once copying)}. The copy is the job's first phase: the export starts once its state is "done".
+    copy: dict | None = None
 
     def __post_init__(self) -> None:
         overlay = self.config.overlay.enabled
@@ -114,6 +119,7 @@ class Job:
             "progress": self.overall,
             "parallel": self.config.encoding.parallel_jobs,
             "overlay": self.config.overlay.enabled,
+            "copy": self.copy,
             "history": list(self.history),
             "tasks": [{"id": k, **{x: v[x] for x in ("label", "stage", "progress", "seconds", "speed", "stages",
                                                      "started", "finished")}} for k, v in self.tasks.items()],
@@ -128,8 +134,9 @@ class JobManager:
         self._caffeinate: subprocess.Popen | None = None
         threading.Thread(target=self._worker, daemon=True).start()
 
-    def submit(self, group: Group, config: AppConfig, pieces: list[Piece]) -> Job:
-        job = Job(group=group, config=config.model_copy(deep=True), pieces=pieces)
+    def submit(self, group: Group, config: AppConfig, pieces: list[Piece], cleanup: Callable[[], None] | None = None,
+               copy: dict | None = None) -> Job:
+        job = Job(group=group, config=config.model_copy(deep=True), pieces=pieces, cleanup=cleanup, copy=copy)
         self.jobs[job.id] = job
         self.queue.put(job)
         return job
@@ -138,6 +145,7 @@ class JobManager:
         job = self.jobs[job_id]
         if job.status == "queued":
             job.status = "cancelled"
+            _cleanup(job)
             job.finished = time.time()
         elif job.status == "running" and job.ctx:
             if not job.ctx.cancel_event.is_set():
@@ -160,6 +168,7 @@ class JobManager:
             job.ctx = Context(log=job.log, progress=job.set_progress, cancel_event=threading.Event(),
                               processes=set(), lock=threading.Lock(), step=lambda text: job.ctx.cancel_event.is_set() or setattr(job, "activity", text))
             try:
+                _wait_for_copy(job)
                 job.output = str(process_group(job.group, job.config, job.ctx, job.pieces))
                 job.status = "done"
                 job.log(f"Done: {job.output}")
@@ -175,6 +184,7 @@ class JobManager:
                 job.status, job.error = "failed", f"{type(e).__name__}: {e}"
                 job.log(traceback.format_exc())
             finally:
+                _cleanup(job)
                 job.finished = time.time()
                 self.current = None
                 if self.queue.empty():
@@ -190,6 +200,23 @@ class JobManager:
         elif not on and self._caffeinate is not None:
             self._caffeinate.terminate()
             self._caffeinate = None
+
+
+def _wait_for_copy(job: Job) -> None:
+    while job.copy and job.copy["state"] != "done":
+        if job.copy["state"] == "failed":
+            raise StepFailed(f"Copying the footage to this Mac failed: {job.copy['error']}")
+        job.ctx.step("Waiting for its footage to be copied to this Mac")
+        if job.ctx.cancel_event.wait(0.5):
+            raise Cancelled
+
+
+def _cleanup(job: Job) -> None:
+    if job.cleanup:
+        try:
+            job.cleanup()
+        except Exception as e:  # noqa: BLE001 - a failed cleanup must not hide how the job ended
+            job.log(f"Cleanup failed: {e}")
 
 
 def _clock(seconds: float) -> str:
