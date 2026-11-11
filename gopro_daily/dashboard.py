@@ -20,8 +20,10 @@ def dashboard_script() -> str:
 
 def main() -> None:
     from .day_journey_map import register
+    from .track import lift_gps_timeout
 
     register()
+    lift_gps_timeout()
     script = dashboard_script()
     sys.argv = [script, *sys.argv[1:]]
     runpy.run_path(script, run_name="__main__")

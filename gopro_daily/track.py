@@ -17,6 +17,18 @@ from .config import AppConfig
 POINTS_PER_SECOND = 5  # GoPro GPS is 10-18 Hz; 5 Hz is plenty for a line and keeps the track small
 
 
+def lift_gps_timeout() -> None:
+    """gopro-overlay hardcodes 45 s for ffmpeg to pull a chapter's GPS track. Straight from an SD card one 12 GB
+    chapter takes ~35 s on its own and minutes when several are read at once, so every overlay failed.
+    Call once per process: it replaces FFMPEG.stream for everything gopro-overlay runs afterwards."""
+    from datetime import timedelta
+
+    from gopro_overlay.ffmpeg import FFMPEG
+
+    stream = FFMPEG.stream
+    FFMPEG.stream = lambda self, args, cb, timeout=None: stream(self, args, cb, timeout=timedelta(minutes=15))
+
+
 def extract_points(video: Path, config: AppConfig) -> list[tuple[float, float, float]]:
     """(unix time, lat, lon) of every GPS-locked sample in the video."""
     from datetime import timedelta

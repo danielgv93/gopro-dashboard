@@ -315,3 +315,31 @@ def test_cancel_stops_the_gps_read_at_once(tmp_path: Path):
     assert time.time() - started < 3
     time.sleep(0.2)
     assert subprocess.run(["pgrep", "-f", str(tmp_path)], capture_output=True).returncode == 1  # no ffprobe left
+
+
+def test_kill_tree_ignores_a_group_of_zombies():
+    import signal
+    import subprocess
+    import time
+
+    from gopro_daily.pipeline import _kill_tree
+
+    proc = subprocess.Popen(["true"], start_new_session=True)
+    time.sleep(0.3)  # exited, not reaped yet: macOS killpg raises EPERM here
+    _kill_tree(proc, signal.SIGTERM)
+    proc.wait()
+
+
+def test_gps_read_gets_more_than_the_45_s_of_gopro_overlay(monkeypatch):
+    from datetime import timedelta
+
+    from gopro_overlay.ffmpeg import FFMPEG
+
+    from gopro_daily.track import lift_gps_timeout
+
+    seen = []
+    monkeypatch.setattr(FFMPEG, "stream", lambda self, args, cb, timeout=None: seen.append(timeout))
+    lift_gps_timeout()
+    monkeypatch.setattr(FFMPEG, "stream", FFMPEG.stream)  # so the patched method is undone after the test
+    FFMPEG().stream([], cb=None, timeout=timedelta(seconds=45))
+    assert seen == [timedelta(minutes=15)]

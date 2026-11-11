@@ -36,7 +36,7 @@ from .config import PROJECT_ROOT, AppConfig
 from .edits import OVERLAY_MIN_SECONDS, Piece, Span, Unit, plan_pieces, plan_units
 from .layout import generate_layout
 from .scanner import Group, Recording, ffprobe_bin, probe
-from .track import extract_points, write_track
+from .track import extract_points, lift_gps_timeout, write_track
 
 PROFILE_NAME = "gopro-daily"
 CACHE_DIR = PROJECT_ROOT / ".cache"
@@ -73,7 +73,7 @@ def _kill_tree(proc: subprocess.Popen, sig: int) -> None:
     (and keep our stdout pipe open, so `run` never returns)."""
     try:
         os.killpg(proc.pid, sig)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # macOS answers EPERM when the group only holds zombies
         pass
 
 
@@ -554,6 +554,7 @@ def _gps_worker_init() -> None:
     """Pool.terminate only signals the worker: take its ffmpeg/ffprobe down with it."""
     os.setsid()
     signal.signal(signal.SIGTERM, lambda *_: os.killpg(0, signal.SIGKILL))
+    lift_gps_timeout()
 
 
 def build_tracks(recordings: list[Recording], work: Path, config: AppConfig, ctx: Context) -> dict[str, Path]:
