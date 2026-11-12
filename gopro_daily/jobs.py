@@ -41,7 +41,7 @@ class Job:
     ctx: Context | None = None
     cleanup: Callable[[], None] | None = None  # runs once the job ends, however it ends (deletes copied footage)
     # Set when the footage is first copied to this Mac: {"state": pending|waiting|copying|done|failed, "copied",
-    # "total", "error", "started" (once copying)}. The copy is the job's first phase: the export starts once its state is "done".
+    # "total", "error", and once copying "started" and "history" (seconds since started, bytes copied) every 2 s}. The copy is the job's first phase: the export starts once its state is "done".
     copy: dict | None = None
 
     def __post_init__(self) -> None:

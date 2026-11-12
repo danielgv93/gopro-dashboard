@@ -344,7 +344,7 @@ def _copy_films(keys: list[str], groups: dict[str, Group], plans: dict, config: 
             footage_copy.wait(lambda: job.finished is not None or exporting() + sizes[i] + reserved <= free)
         if job.finished is not None:  # cancelled before its turn
             return False
-        job.copy.update(state="copying", started=time.time())  # the UI derives the copy speed from it
+        job.copy.update(state="copying", started=time.time(), history=[(0, 0)])
         return True
 
     def dropped(i: int) -> bool:  # its export was cancelled while the files were copying
@@ -352,7 +352,11 @@ def _copy_films(keys: list[str], groups: dict[str, Group], plans: dict, config: 
         return job.finished is not None or (job.ctx is not None and job.ctx.cancel_event.is_set())
 
     def progress(i: int, n: int) -> None:
-        queued[i].copy["copied"] += n
+        c = queued[i].copy
+        c["copied"] += n
+        elapsed = time.time() - c["started"]
+        if elapsed - c["history"][-1][0] >= 2:  # (seconds since the copy started, bytes copied): speed and its chart
+            c["history"] = c["history"][-599:] + [(round(elapsed, 1), c["copied"])]
 
     def done(i: int) -> None:
         queued[i].copy["state"] = "done"

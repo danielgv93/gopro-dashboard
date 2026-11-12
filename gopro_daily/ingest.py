@@ -8,7 +8,6 @@ import threading
 import time
 from pathlib import Path
 
-CHUNK = 8 * 1024 * 1024
 ORIGIN_FILE = ".gopro-daily-source"  # inside older whole-card copies: the folder they were copied from
 SPACE_MARGIN = 2 * 1024**3  # spare room on top of the estimates
 
@@ -99,21 +98,36 @@ class FootageCopy:
         # A half-copied file never carries the real name, so an interrupted copy is never mistaken for a finished one.
         tmp = dst.with_name(dst.name + ".partial")
         dst.parent.mkdir(parents=True, exist_ok=True)
+        src.stat()  # a pulled card fails here with FileNotFoundError rather than a vague cp error
+        # cp uses the system's native copy (like Finder): ~79 MB/s from the SD vs ~30 MB/s with Python read/write.
+        # -p keeps mtime, which the scanner can use as recording time.
+        proc = subprocess.Popen(["cp", "-p", str(src), str(tmp)], stderr=subprocess.PIPE, text=True)
+        reported = 0
         try:
-            with src.open("rb") as fin, tmp.open("wb") as fout:
-                while chunk := fin.read(CHUNK):
-                    if self._cancel.is_set():
-                        raise Cancelled
-                    if self._hooks["dropped"](film):
-                        raise Dropped
-                    fout.write(chunk)
-                    self.state["copied"] += len(chunk)
-                    self._hooks["progress"](film, len(chunk))
-            shutil.copystat(src, tmp)  # keeps mtime, which the scanner can use as recording time
+            while True:
+                done = proc.poll() is not None
+                if self._cancel.is_set():
+                    raise Cancelled
+                if self._hooks["dropped"](film):
+                    raise Dropped
+                size = tmp.stat().st_size if tmp.exists() else 0
+                if size > reported:
+                    self.state["copied"] += size - reported
+                    self._hooks["progress"](film, size - reported)
+                    reported = size
+                if done:
+                    break
+                time.sleep(0.5)
+            if proc.returncode:
+                raise OSError(f"cp failed: {proc.stderr.read().strip()}")
             tmp.replace(dst)
         except BaseException:
+            proc.kill()
+            proc.wait()
             tmp.unlink(missing_ok=True)
             raise
+        finally:
+            proc.stderr.close()
 
 
 def copy_origin(copy: Path) -> Path | None:

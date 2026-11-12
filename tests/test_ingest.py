@@ -136,7 +136,7 @@ def test_copy_first_queues_every_film_with_a_copy_phase_and_waits_for_room(tmp_p
     copier = server.footage_copy
     copier.wait(lambda: second.copy["state"] == "waiting")
     assert first.copy["state"] == "done" and first.copy["copied"] == first.copy["total"] == 100
-    assert first.copy["started"] > 0  # the UI's copy speed is measured from it
+    assert first.copy["history"][0] == (0, 0)  # the UI's copy speed and chart are measured from it
     assert first.summary()["copy"]["state"] == "done"
     chapter = first.group.recordings[0].chapters[0]
     assert chapter.path.is_file() and chapter.path.is_relative_to(tmp_path / "work" / "exports") and chapter.lrv is None

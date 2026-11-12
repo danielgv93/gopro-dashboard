@@ -998,8 +998,18 @@ function renderJobs(jobs) {
 
 const PHASES = { copy: "Copy to Mac", join: "Join chapters", overlay: "Draw overlay", concat: "Final video" };
 const copyFrac = c => c.total ? c.copied / c.total : 1;
-// Average since this film's copy started: bytes per second, or 0 until a few seconds have passed.
-const copySpeed = c => c.started && Date.now() / 1000 - c.started > 2 ? c.copied / (Date.now() / 1000 - c.started) : 0;
+// Bytes per second over the last ~8 s at each sample (they are 2 s apart): follows a card that slows down, which an
+// average since the start would hide for minutes.
+function copySpeeds(c) {
+  const h = c.history || [], out = [];
+  for (let i = 1; i < h.length; i++) {
+    let s = i - 1;
+    while (s > 0 && h[i][0] - h[s][0] < 8) s--;
+    out.push((h[i][1] - h[s][1]) / (h[i][0] - h[s][0]));
+  }
+  return out;
+}
+const copySpeed = c => copySpeeds(c).at(-1) || 0;
 const copyLeft = c => copySpeed(c) ? (c.total - c.copied) / copySpeed(c) : null;
 const copyNote = c => ({
   pending: "Copies to this Mac after the films before it",
@@ -1067,19 +1077,8 @@ function renderJobLive(j, elapsed, eta) {
     el("li", { class: i < current || current < 0 ? "done" : i === current ? "current" : "", "aria-current": i === current ? "step" : null },
       el("span", { class: "phase-dot", "aria-hidden": "true" }, i < current || current < 0 ? "✓" : i + 1), PHASES[ph])));
 
-  let spark = null;
-  if (speeds.length > 1) {
-    // the lossless join runs far faster than the overlay; cap the scale so it does not flatten the rest
-    const sorted = [...speeds].sort((a, b) => a - b), max = sorted.at(-1);
-    const top = Math.max(0.1, Math.min(max, sorted[Math.floor(sorted.length / 2)] * 1.6)), w = 300, h = 44;
-    const pts = speeds.map((v, i) => `${(i / (speeds.length - 1) * w).toFixed(1)},${(h - 2 - Math.min(v, top) / top * (h - 6)).toFixed(1)}`);
-    spark = el("div", { class: "job-spark" },
-      el("div", { class: "spark-head" }, el("span", {}, "Throughput"), el("span", {}, `peak ${fmtSpeed(max)} · now ${fmtSpeed(speeds.at(-1))}`)),
-      svgBox("spark-chart", `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">` +
-        `<polygon class="spark-area" points="0,${h} ${pts.join(" ")} ${w},${h}"/>` +
-        `<polyline class="spark-line" points="${pts.join(" ")}" vector-effect="non-scaling-stroke"/></svg>`,
-        `Speed over time, now ${fmtSpeed(speeds.at(-1))} realtime`));
-  }
+  const spark = copying ? sparkChart(copySpeeds(j.copy), "Copy speed", v => `${fmtSize(v)}/s`)
+    : sparkChart(speeds, "Throughput", fmtSpeed, " realtime");
 
   const lane = t => {
     const idx = t.stages.indexOf(t.stage);
@@ -1112,6 +1111,20 @@ function renderJobLive(j, elapsed, eta) {
           el("span", {}, `${j.parallel} at a time`))),
       pieces.map(lane),
       lane(final)));
+}
+
+function sparkChart(speeds, title, fmt, unit = "") {
+  if (speeds.length < 2) return null;
+  // the lossless join runs far faster than the overlay; cap the scale so it does not flatten the rest
+  const sorted = [...speeds].sort((a, b) => a - b), max = sorted.at(-1);
+  const top = Math.max(0.1, Math.min(max, sorted[Math.floor(sorted.length / 2)] * 1.6)), w = 300, h = 44;
+  const pts = speeds.map((v, i) => `${(i / (speeds.length - 1) * w).toFixed(1)},${(h - 2 - Math.min(v, top) / top * (h - 6)).toFixed(1)}`);
+  return el("div", { class: "job-spark" },
+    el("div", { class: "spark-head" }, el("span", {}, title), el("span", {}, `peak ${fmt(max)} · now ${fmt(speeds.at(-1))}`)),
+    svgBox("spark-chart", `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">` +
+      `<polygon class="spark-area" points="0,${h} ${pts.join(" ")} ${w},${h}"/>` +
+      `<polyline class="spark-line" points="${pts.join(" ")}" vector-effect="non-scaling-stroke"/></svg>`,
+      `${title} over time, now ${fmt(speeds.at(-1))}${unit}`));
 }
 
 function renderJobDone(j, elapsed) {
